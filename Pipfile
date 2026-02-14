@@ -11,6 +11,8 @@ boto3 = "*"
 django-storages = "*"
 pillow = "*"
 python-decouple = "*"
+gunicorn = "*"
+dj-database-url = "*"
 
 [dev-packages]
 
