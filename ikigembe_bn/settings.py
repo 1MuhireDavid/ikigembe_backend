@@ -178,27 +178,6 @@ BACKDROP_SIZE = (1280, 720)
 CORS_ALLOW_ALL_ORIGINS = True
 
 
-CORS_ALLOW_METHODS = [
-    'DELETE',
-    'GET',
-    'OPTIONS',
-    'PATCH',
-    'POST',
-    'PUT',
-]
-
-CORS_ALLOW_HEADERS = [
-    'accept',
-    'accept-encoding',
-    'authorization',
-    'content-type',
-    'dnt',
-    'origin',
-    'user-agent',
-    'x-csrftoken',
-    'x-requested-with',
-]
-
 # Security settings
 SECURE_CROSS_ORIGIN_OPENER_POLICY = None  # Allow video embedding
 X_FRAME_OPTIONS = 'SAMEORIGIN'
