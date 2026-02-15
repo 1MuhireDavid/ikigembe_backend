@@ -14,7 +14,6 @@ import os
 from pathlib import Path
 from decouple import config
 import dj_database_url
-from django.contrib.auth import get_user_model
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -197,14 +196,3 @@ X_FRAME_OPTIONS = 'SAMEORIGIN'
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-
-if os.environ.get("CREATE_SUPERUSER") == "True":
-    username = os.environ.get("DJANGO_SUPERUSER_USERNAME")
-    email = os.environ.get("DJANGO_SUPERUSER_EMAIL")
-    password = os.environ.get("DJANGO_SUPERUSER_PASSWORD")
-
-    User = get_user_model()
-
-    if not User.objects.filter(username=username).exists():
-        print("Creating superuser...")
-        User.objects.create_superuser(username=username, email=email, password=password)
