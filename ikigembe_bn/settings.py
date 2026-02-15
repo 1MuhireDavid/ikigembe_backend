@@ -175,7 +175,9 @@ THUMBNAIL_SIZE = (300, 450)
 BACKDROP_SIZE = (1280, 720)
 
 
-CORS_ALLOW_ALL_ORIGINS = True
+CSRF_TRUSTED_ORIGINS = [
+    "https://ikigembe-backend.onrender.com",
+]
 
 
 # Security settings
