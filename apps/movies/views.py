@@ -291,3 +291,19 @@ class MovieImagesView(APIView):
                 {'error': 'Movie not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
+
+
+class MovieCreateView(APIView):
+    """
+    Create a new movie
+    Accepts multipart/form-data for file uploads
+    """
+    # parser_classes = (MultiPartParser, FormParser) # APIView doesn't have default parsers for everything, but usually REST_FRAMEWORK defaults include them. 
+    # Better to interpret explicit parsers if we want to be safe, but let's stick to standard APIView for now or use CreateAPIView which is better.
+    
+    def post(self, request):
+        serializer = MovieCreateSerializer(data=request.data)
+        if serializer.is_valid():
+            movie = serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

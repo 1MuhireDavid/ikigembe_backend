@@ -9,7 +9,8 @@ from .views import (
     MovieVideosView,
     MovieImagesView,
     MovieStreamView,
-    MovieTrailerView
+    MovieTrailerView,
+    MovieCreateView
 )
 
 urlpatterns = [
@@ -21,6 +22,7 @@ urlpatterns = [
     path('upcoming/', UpcomingMoviesView.as_view(), name='upcoming-movies'),
     
     # Movie Details
+    path('create/', MovieCreateView.as_view(), name='movie-create'),
     path('<int:id>/', MovieDetailView.as_view(), name='movie-detail'),
     path('<int:id>/videos/', MovieVideosView.as_view(), name='movie-videos'),
     path('<int:id>/images/', MovieImagesView.as_view(), name='movie-images'),

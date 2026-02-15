@@ -13,6 +13,7 @@ pillow = "*"
 python-decouple = "*"
 gunicorn = "*"
 dj-database-url = "*"
+drf-spectacular = "*"
 
 [dev-packages]
 

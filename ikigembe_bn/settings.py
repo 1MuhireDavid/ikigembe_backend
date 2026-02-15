@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'storages',
+    'drf_spectacular',
 ]
 
 MIDDLEWARE = [
@@ -60,9 +61,18 @@ MIDDLEWARE = [
 ROOT_URLCONF = 'ikigembe_bn.urls'
 
 REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
     ]
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Ikigembe API',
+    'DESCRIPTION': 'API documentation for Ikigembe Backend',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    # 'COMPONENT_SPLIT_REQUEST': True
 }
 
 TEMPLATES = [
@@ -86,23 +96,14 @@ WSGI_APPLICATION = 'ikigembe_bn.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-if os.environ.get("RENDER"):
-    DATABASES = {
-        "default": dj_database_url.config(
-            default=os.environ.get("DATABASE_URL")
-        )
-    }
-else:
-    DATABASES = {
-        "default": {
-            "ENGINE": os.getenv('DB_ENGINE'),
-            "NAME": os.getenv('DB_NAME'),
-            "USER": os.getenv('DB_USER'),
-            "PASSWORD": os.getenv('DB_PASSWORD'),
-            "HOST": os.getenv('DB_HOST'),
-            "PORT": os.getenv('DB_PORT'),
-        }
-    }
+
+DATABASES = {
+    "default": dj_database_url.config(
+        default=os.environ.get("DATABASE_URL"),
+        conn_max_age=600,
+        ssl_require=True
+    )
+}
 
 
 # Password validation

@@ -137,3 +137,26 @@ class MovieVideoAccessSerializer(serializers.ModelSerializer):
         """
         # TODO: Implement payment verification
         return True
+
+
+class MovieCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating movies with file uploads"""
+    
+    class Meta:
+        model = Movie
+        fields = [
+            'id',
+            'title',
+            'overview',
+            'thumbnail',
+            'backdrop',
+            'video_file',
+            'trailer_file',
+            'price',
+            'release_date',
+            'duration_minutes',
+            'trailer_duration_seconds',
+            'is_active',
+            'has_free_preview'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'views', 'rating']
