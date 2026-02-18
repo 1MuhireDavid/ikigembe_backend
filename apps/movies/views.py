@@ -7,8 +7,15 @@ from .models import Movie
 from .serializers import (
     MovieSerializer, 
     MovieDetailSerializer,
-    MovieVideoAccessSerializer
+    MovieVideoAccessSerializer,
+    MovieCreateSerializer
 )
+from rest_framework.permissions import IsAdminUser
+from django.conf import settings
+import boto3
+import uuid
+import os
+from rest_framework.authentication import SessionAuthentication
 
 
 class DiscoverMoviesView(APIView):
@@ -307,3 +314,157 @@ class MovieCreateView(APIView):
             movie = serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class InitiateMultipartUploadView(APIView):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        file_name = request.data.get('file_name')
+        file_type = request.data.get('file_type')
+        
+        if not file_name or not file_type:
+            return Response({'error': 'Missing file_name or file_type'}, status=400)
+
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_S3_REGION_NAME
+        )
+
+        field_name = request.data.get('field_name')
+
+        # Generate unique file path
+        ext = os.path.splitext(file_name)[1]
+        unique_filename = f"{uuid.uuid4()}{ext}"
+        
+        # Determine folder based on field name or file type
+        key = f"movies/uploads/{unique_filename}"
+        
+        if field_name == 'video_file':
+            key = f"movies/full/{unique_filename}"
+        elif field_name == 'trailer_file':
+            key = f"movies/trailers/{unique_filename}"
+        elif field_name == 'thumbnail':
+            key = f"movies/thumbnails/{unique_filename}"
+        elif field_name == 'backdrop':
+            key = f"movies/backdrops/{unique_filename}"
+        elif file_type.startswith('video/'):
+             key = f"movies/full/{unique_filename}"
+        elif file_type.startswith('image/'):
+             key = f"movies/thumbnails/{unique_filename}"
+
+        try:
+            mp_upload = s3_client.create_multipart_upload(
+                Bucket=settings.AWS_STORAGE_BUCKET_NAME,
+                Key=key,
+                ContentType=file_type
+            )
+            
+            return Response({
+                'upload_id': mp_upload['UploadId'],
+                'file_key': key
+            })
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+
+class SignMultipartUploadPartView(APIView):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        data = request.data
+        upload_id = data.get('upload_id')
+        file_key = data.get('file_key')
+        part_number = data.get('part_number')
+
+        if not all([upload_id, file_key, part_number]):
+            return Response({'error': 'Missing required fields'}, status=400)
+
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_S3_REGION_NAME
+        )
+
+        try:
+            presigned_url = s3_client.generate_presigned_url(
+                ClientMethod='upload_part',
+                Params={
+                    'Bucket': settings.AWS_STORAGE_BUCKET_NAME,
+                    'Key': file_key,
+                    'UploadId': upload_id,
+                    'PartNumber': int(part_number)
+                },
+                ExpiresIn=3600
+            )
+            
+            return Response({'url': presigned_url})
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+
+class CompleteMultipartUploadView(APIView):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        data = request.data
+        upload_id = data.get('upload_id')
+        file_key = data.get('file_key')
+        parts = data.get('parts') # List of {'ETag': '...', 'PartNumber': 1}
+
+        if not all([upload_id, file_key, parts]):
+            return Response({'error': 'Missing required fields'}, status=400)
+
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_S3_REGION_NAME
+        )
+
+        try:
+            s3_client.complete_multipart_upload(
+                Bucket=settings.AWS_STORAGE_BUCKET_NAME,
+                Key=file_key,
+                UploadId=upload_id,
+                MultipartUpload={'Parts': parts}
+            )
+            return Response({'status': 'complete'})
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+
+class AbortMultipartUploadView(APIView):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        data = request.data
+        upload_id = data.get('upload_id')
+        file_key = data.get('file_key')
+
+        if not all([upload_id, file_key]):
+            return Response({'error': 'Missing required fields'}, status=400)
+
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_S3_REGION_NAME
+        )
+
+        try:
+            s3_client.abort_multipart_upload(
+                Bucket=settings.AWS_STORAGE_BUCKET_NAME,
+                Key=file_key,
+                UploadId=upload_id
+            )
+            return Response({'status': 'aborted'})
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
