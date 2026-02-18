@@ -1,0 +1,32 @@
+.s3-direct-upload-widget {
+    border: 1px solid #ddd;
+    padding: 10px;
+    border-radius: 4px;
+    background: #f9f9f9;
+    max-width: 400px;
+}
+
+.s3-direct-upload-widget .progress-bar-container {
+    height: 10px;
+    background: #e0e0e0;
+    border-radius: 5px;
+    margin-top: 10px;
+    overflow: hidden;
+    display: none; /* Hidden by default */
+}
+
+.s3-direct-upload-widget .progress-bar {
+    height: 100%;
+    background: #4caf50;
+    width: 0%;
+    transition: width 0.3s;
+}
+
+.s3-direct-upload-widget .status-area {
+    margin-top: 5px;
+    font-size: 0.9em;
+    color: #666;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}

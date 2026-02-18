@@ -10,7 +10,11 @@ from .views import (
     MovieImagesView,
     MovieStreamView,
     MovieTrailerView,
-    MovieCreateView
+    MovieCreateView,
+    InitiateMultipartUploadView,
+    SignMultipartUploadPartView,
+    CompleteMultipartUploadView,
+    AbortMultipartUploadView
 )
 
 urlpatterns = [
@@ -23,6 +27,13 @@ urlpatterns = [
     
     # Movie Details
     path('create/', MovieCreateView.as_view(), name='movie-create'),
+    
+    # Multipart Upload
+    path('upload/initiate/', InitiateMultipartUploadView.as_view(), name='upload-initiate'),
+    path('upload/sign-part/', SignMultipartUploadPartView.as_view(), name='upload-sign-part'),
+    path('upload/complete/', CompleteMultipartUploadView.as_view(), name='upload-complete'),
+    path('upload/abort/', AbortMultipartUploadView.as_view(), name='upload-abort'),
+
     path('<int:id>/', MovieDetailView.as_view(), name='movie-detail'),
     path('<int:id>/videos/', MovieVideosView.as_view(), name='movie-videos'),
     path('<int:id>/images/', MovieImagesView.as_view(), name='movie-images'),

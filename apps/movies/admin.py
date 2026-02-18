@@ -1,6 +1,20 @@
 from django.contrib import admin
 from django.utils.html import format_html
+from django import forms
+from django.conf import settings
 from .models import Movie
+from .widgets import S3DirectUploadWidget
+
+
+class MovieAdminForm(forms.ModelForm):
+    video_file = forms.CharField(widget=S3DirectUploadWidget(), required=False)
+    trailer_file = forms.CharField(widget=S3DirectUploadWidget(), required=False)
+    thumbnail = forms.CharField(widget=S3DirectUploadWidget(), required=False)
+    backdrop = forms.CharField(widget=S3DirectUploadWidget(), required=False)
+
+    class Meta:
+        model = Movie
+        fields = '__all__'
 
 
 @admin.register(Movie)
@@ -9,6 +23,8 @@ class MovieAdmin(admin.ModelAdmin):
     Django Admin with file upload support
     Upload videos and images directly - no manual URL entry!
     """
+    
+    form = MovieAdminForm
     
     # Fields to display in list view
     list_display = [
@@ -60,6 +76,10 @@ class MovieAdmin(admin.ModelAdmin):
         ('Basic Information', {
             'fields': ('title', 'overview')
         }),
+        ('Cast & Crew', {
+            'fields': ('cast', 'genres', 'producer'),
+            'description': 'Cast is a list of actor names (JSON). Genres is a list of genre strings (JSON).'
+        }),
         ('Upload Media Files', {
             'fields': (
                 'thumbnail',
@@ -96,9 +116,13 @@ class MovieAdmin(admin.ModelAdmin):
     def thumbnail_preview(self, obj):
         """Show thumbnail preview in list view"""
         if obj.thumbnail:
+            # Build URL directly from the S3 key (obj.thumbnail.name)
+            # to avoid MEDIA_URL prefix mismatch
+            key = obj.thumbnail.name
+            url = f'https://{settings.AWS_S3_CUSTOM_DOMAIN}/{key}'
             return format_html(
                 '<img src="{}" width="50" height="75" style="object-fit: cover; border-radius: 4px;" />',
-                obj.thumbnail.url
+                url
             )
         return '-'
     thumbnail_preview.short_description = 'Poster'
@@ -132,8 +156,28 @@ class MovieAdmin(admin.ModelAdmin):
         self.message_user(request, f'Free preview disabled for {updated} movie(s).')
     
     # Add custom styling
+    # Add custom styling
     class Media:
-        css = {
-            'all': ('admin/css/movie_admin.css',)
-        }
-        js = ('admin/js/movie_admin.js',)
+        # css = {
+        #     'all': ('admin/css/movie_admin.css',)
+        # }
+        # js = ('admin/js/movie_admin.js',)
+        pass
+
+    def save_model(self, request, obj, form, change):
+        """
+        Handle direct S3 uploads.
+        If a string is passed for a FileField (S3 key), we set it explicitly.
+        """
+        for field_name in ['video_file', 'trailer_file', 'thumbnail', 'backdrop']:
+            field_data = form.cleaned_data.get(field_name)
+            
+            # If the data is a string (S3 Key), update the model field's name
+            # If it's a File object, Django handles it normally (but our widget prevents this for large files)
+            # If it's None/Empty, and we are not changing it, do nothing.
+            
+            if isinstance(field_data, str) and field_data:
+                 # It's an S3 key string
+                 getattr(obj, field_name).name = field_data
+        
+        super().save_model(request, obj, form, change)

@@ -41,6 +41,24 @@ class Movie(models.Model):
         help_text='Upload trailer video file (optional)'
     )
     
+    # Cast, Genres, Producer
+    cast = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='List of actor names, e.g. ["Actor One", "Actor Two"]'
+    )
+    genres = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='List of genres, e.g. ["Action", "Drama"]'
+    )
+    producer = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text='Name of the movie producer'
+    )
+    
     # Video Metadata
     duration_minutes = models.PositiveIntegerField(
         default=0,

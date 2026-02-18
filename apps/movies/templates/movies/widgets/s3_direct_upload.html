@@ -1,0 +1,25 @@
+<div class="s3-direct-upload-widget" data-field-name="{{ widget.name }}">
+    <p class="file-info">Current: 
+        {% if widget.value %}
+            <a href="{{ widget.value.url }}" target="_blank">{{ widget.value.name }}</a>
+        {% else %}
+            No file chosen
+        {% endif %}
+    </p>
+    
+    <input type="file" {% include "django/forms/widgets/attrs.html" %}>
+    
+    <!-- This hidden input stores the S3 key that will be sent to Django -->
+    <input type="hidden" name="{{ widget.name }}" value=""> 
+    
+    <div class="progress-bar-container">
+        <div class="progress-bar"></div>
+    </div>
+    
+    <div class="status-area">
+        <span class="status-icon"></span>
+        <span class="progress-text"></span>
+    </div>
+    
+    <div class="preview-area"></div>
+</div>

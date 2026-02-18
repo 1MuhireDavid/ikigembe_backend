@@ -68,7 +68,10 @@ class MovieDetailSerializer(serializers.ModelSerializer):
             'duration_minutes',
             'has_free_preview',
             'is_active',
-            'created_at'
+            'created_at',
+            'cast',
+            'genres',
+            'producer'
         ]
     
     def get_thumbnail_url(self, obj):
@@ -157,6 +160,9 @@ class MovieCreateSerializer(serializers.ModelSerializer):
             'duration_minutes',
             'trailer_duration_seconds',
             'is_active',
-            'has_free_preview'
+            'has_free_preview',
+            'cast',
+            'genres',
+            'producer'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'views', 'rating']
