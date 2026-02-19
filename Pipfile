@@ -14,6 +14,8 @@ python-decouple = "*"
 gunicorn = "*"
 dj-database-url = "*"
 drf-spectacular = "*"
+djangorestframework-simplejwt = "*"
+google-auth = {extras = ["requests"], version = "*"}
 
 [dev-packages]
 
