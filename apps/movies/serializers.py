@@ -8,6 +8,7 @@ class MovieSerializer(serializers.ModelSerializer):
     # FileField.url already returns a full https:// S3/CloudFront URL
     thumbnail_url = serializers.SerializerMethodField()
     backdrop_url = serializers.SerializerMethodField()
+    trailer_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Movie
@@ -17,6 +18,7 @@ class MovieSerializer(serializers.ModelSerializer):
             'overview',
             'thumbnail_url',
             'backdrop_url',
+            'trailer_url',
             'price',
             'rating',
             'release_date',
@@ -32,6 +34,10 @@ class MovieSerializer(serializers.ModelSerializer):
     def get_backdrop_url(self, obj):
         """Returns the absolute CloudFront/S3 URL for the backdrop."""
         return obj.backdrop.url if obj.backdrop else None
+
+    def get_trailer_url(self, obj):
+        """Returns the trailer URL for background video autoplay (free, always accessible)."""
+        return obj.trailer_file.url if obj.trailer_file else None
 
 
 class MovieDetailSerializer(serializers.ModelSerializer):
