@@ -161,37 +161,38 @@ class MovieDetailView(APIView):
 
 class MovieVideosView(APIView):
     """
-    Get video information for a movie
-    Returns trailer (always accessible) and full video info
+    Get video information for a movie.
+    Returns trailer (always accessible) and full video info.
     """
     def get(self, request, id):
         try:
             movie = Movie.objects.get(id=id, is_active=True)
-            
+
             videos = []
-            
+
             # Add trailer if available
-            if movie.trailer_key:
+            if movie.trailer_file:
                 videos.append({
-                    'key': movie.trailer_key,
+                    'url': movie.trailer_url,   # CloudFront/S3 URL
                     'name': f'{movie.title} - Trailer',
                     'type': 'Trailer',
                     'site': 'Local',
                     'duration_seconds': movie.trailer_duration_seconds,
                     'is_free': True
                 })
-            
+
             # Add full video info
-            videos.append({
-                'key': movie.video_key,
-                'name': f'{movie.title} - Full Movie',
-                'type': 'Full Movie',
-                'site': 'Local',
-                'duration_minutes': movie.duration_minutes,
-                'requires_payment': True,
-                'price': movie.price
-            })
-            
+            if movie.video_file:
+                videos.append({
+                    'url': movie.video_url,     # CloudFront/S3 URL
+                    'name': f'{movie.title} - Full Movie',
+                    'type': 'Full Movie',
+                    'site': 'Local',
+                    'duration_minutes': movie.duration_minutes,
+                    'requires_payment': True,
+                    'price': movie.price
+                })
+
             return Response({
                 'id': movie.id,
                 'results': videos
@@ -205,35 +206,35 @@ class MovieVideosView(APIView):
 
 class MovieStreamView(APIView):
     """
-    Get streaming URL for full movie
-    In development: Always grants access
-    In production: Verify payment before granting access
+    Get streaming URL for full movie.
+    In development: Always grants access.
+    In production: Verify payment before granting access.
     """
     def get(self, request, id):
         try:
             movie = Movie.objects.get(id=id, is_active=True)
-            
+
             # TODO: In production, check payment status
             # if not self.has_user_paid(request.user, movie):
             #     return Response(
             #         {'error': 'Payment required', 'price': movie.price},
             #         status=status.HTTP_402_PAYMENT_REQUIRED
             #     )
-            
+
             # Increment view count
             movie.increment_views()
-            
+
             serializer = MovieVideoAccessSerializer(
-                movie, 
+                movie,
                 context={'request': request}
             )
-            
+
             return Response({
                 'movie': serializer.data,
-                'stream_url': f'/media/{movie.video_key}',  # Adjust based on your storage
+                'stream_url': movie.video_url,  # CloudFront/S3 absolute URL
                 'message': 'Development mode - payment not required'
             })
-            
+
         except Movie.DoesNotExist:
             return Response(
                 {'error': 'Movie not found'},
@@ -243,27 +244,26 @@ class MovieStreamView(APIView):
 
 class MovieTrailerView(APIView):
     """
-    Get trailer streaming URL - always free
+    Get trailer streaming URL - always free.
     """
     def get(self, request, id):
         try:
             movie = Movie.objects.get(id=id, is_active=True)
-            
-            if not movie.trailer_key:
+
+            if not movie.trailer_file:
                 return Response(
                     {'error': 'Trailer not available for this movie'},
                     status=status.HTTP_404_NOT_FOUND
                 )
-            
+
             return Response({
                 'id': movie.id,
                 'title': movie.title,
-                'trailer_key': movie.trailer_key,
-                'stream_url': f'/media/{movie.trailer_key}',
+                'stream_url': movie.trailer_url,  # CloudFront/S3 absolute URL
                 'duration_seconds': movie.trailer_duration_seconds,
                 'is_free': True
             })
-            
+
         except Movie.DoesNotExist:
             return Response(
                 {'error': 'Movie not found'},

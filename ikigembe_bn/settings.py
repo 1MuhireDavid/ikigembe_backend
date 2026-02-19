@@ -169,7 +169,13 @@ AWS_S3_REGION_NAME = os.getenv('AWS_S3_REGION_NAME')
 AWS_S3_FILE_OVERWRITE = False
 AWS_DEFAULT_ACL =  None
 AWS_S3_VERIFY = True
-AWS_S3_CUSTOM_DOMAIN = f'{AWS_STORAGE_BUCKET_NAME}.s3.{AWS_S3_REGION_NAME}.amazonaws.com'
+# Use CloudFront domain if configured, otherwise fall back to direct S3
+AWS_CLOUDFRONT_DOMAIN = os.getenv('AWS_CLOUDFRONT_DOMAIN')
+AWS_S3_CUSTOM_DOMAIN = (
+    AWS_CLOUDFRONT_DOMAIN
+    if AWS_CLOUDFRONT_DOMAIN
+    else f'{AWS_STORAGE_BUCKET_NAME}.s3.{AWS_S3_REGION_NAME}.amazonaws.com'
+)
 AWS_S3_OBJECT_PARAMETERS = {'CacheControl': 'max-age=86400'}
 AWS_LOCATION = 'media'
 AWS_S3_FILE_OVERWRITE = False
@@ -187,7 +193,7 @@ STORAGES = {
     },
 }
 
-MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/{AWS_LOCATION}/'
+MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/{AWS_LOCATION}/'  # Automatically uses CloudFront when configured
 
 # Upload limits
 DATA_UPLOAD_MAX_MEMORY_SIZE = 5242880000  # 5GB
