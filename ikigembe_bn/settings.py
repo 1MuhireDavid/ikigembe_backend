@@ -177,7 +177,7 @@ AWS_S3_CUSTOM_DOMAIN = (
     else f'{AWS_STORAGE_BUCKET_NAME}.s3.{AWS_S3_REGION_NAME}.amazonaws.com'
 )
 AWS_S3_OBJECT_PARAMETERS = {'CacheControl': 'max-age=86400'}
-AWS_LOCATION = 'media'
+AWS_LOCATION = ''  # No prefix — files stored at root of bucket (e.g. movies/backdrops/...)
 AWS_S3_FILE_OVERWRITE = False
 AWS_QUERYSTRING_AUTH = False
 
@@ -193,7 +193,7 @@ STORAGES = {
     },
 }
 
-MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/{AWS_LOCATION}/'  # Automatically uses CloudFront when configured
+MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/'  # CloudFront root — no /media/ prefix
 
 # Upload limits
 DATA_UPLOAD_MAX_MEMORY_SIZE = 5242880000  # 5GB
