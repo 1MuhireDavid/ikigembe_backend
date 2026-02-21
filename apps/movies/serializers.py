@@ -9,6 +9,7 @@ class MovieSerializer(serializers.ModelSerializer):
     thumbnail_url = serializers.SerializerMethodField()
     backdrop_url = serializers.SerializerMethodField()
     trailer_url = serializers.SerializerMethodField()
+    video_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Movie
@@ -19,6 +20,7 @@ class MovieSerializer(serializers.ModelSerializer):
             'thumbnail_url',
             'backdrop_url',
             'trailer_url',
+            'video_url',
             'price',
             'rating',
             'release_date',
@@ -39,6 +41,10 @@ class MovieSerializer(serializers.ModelSerializer):
         """Returns the trailer URL for background video autoplay (free, always accessible)."""
         return obj.trailer_file.url if obj.trailer_file else None
 
+    def get_video_url(self, obj):
+        """Returns the full video URL — for testing frontend playback."""
+        return obj.video_file.url if obj.video_file else None
+
 
 class MovieDetailSerializer(serializers.ModelSerializer):
     """Detailed movie serializer - includes trailer info"""
@@ -46,6 +52,7 @@ class MovieDetailSerializer(serializers.ModelSerializer):
     thumbnail_url = serializers.SerializerMethodField()
     backdrop_url = serializers.SerializerMethodField()
     trailer_url = serializers.SerializerMethodField()
+    video_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Movie
@@ -57,6 +64,7 @@ class MovieDetailSerializer(serializers.ModelSerializer):
             'backdrop_url',
             'trailer_url',
             'trailer_duration_seconds',
+            'video_url',
             'price',
             'views',
             'rating',
@@ -78,6 +86,9 @@ class MovieDetailSerializer(serializers.ModelSerializer):
 
     def get_trailer_url(self, obj):
         return obj.trailer_file.url if obj.trailer_file else None
+
+    def get_video_url(self, obj):
+        return obj.video_file.url if obj.video_file else None
 
 
 class MovieVideoAccessSerializer(serializers.ModelSerializer):
