@@ -15,7 +15,9 @@ from datetime import timedelta
 from pathlib import Path
 from decouple import config
 import dj_database_url
+from dotenv import load_dotenv  # Add this import
 
+load_dotenv()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -30,7 +32,6 @@ SECRET_KEY = config('SECRET_KEY', default='django-insecure-k9886x5s5)m8#x8rz%mtj
 DEBUG = config('DEBUG', default=True, cast=bool)
 
 ALLOWED_HOSTS = ["*"]
-
 
 # Application definition
 
@@ -132,12 +133,12 @@ WSGI_APPLICATION = 'ikigembe_bn.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-
+DATABASE_URL = os.getenv('DATABASE_URL')
 DATABASES = {
-    "default": dj_database_url.config(
-        default=os.environ.get("DATABASE_URL"),
+    'default': dj_database_url.config(
+        default=DATABASE_URL,
         conn_max_age=600,
-        ssl_require=True
+        ssl_require='localhost' not in DATABASE_URL and '127.0.0.1' not in DATABASE_URL
     )
 }
 
@@ -213,7 +214,7 @@ STORAGES = {
     },
 }
 
-MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/'  # CloudFront root — no /media/ prefix
+MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/'
 
 # Upload limits
 DATA_UPLOAD_MAX_MEMORY_SIZE = 5242880000  # 5GB
@@ -227,12 +228,6 @@ ALLOWED_IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp']
 THUMBNAIL_SIZE = (300, 450)
 BACKDROP_SIZE = (1280, 720)
 
-
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:4200",       # Angular dev server
-    "http://127.0.0.1:4200",
-    "https://ikigembe-backend.onrender.com",  # Production (update with your frontend domain)
-]
 
 CORS_ALLOW_CREDENTIALS = True
 
