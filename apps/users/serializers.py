@@ -5,9 +5,6 @@ from rest_framework import serializers
 User = get_user_model()
 
 
-# ─────────────────────────────────────────────
-# User representation (safe, read-only)
-# ─────────────────────────────────────────────
 
 class UserSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(
@@ -21,10 +18,10 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = fields
         extra_kwargs = {
             'id': {'help_text': 'Unique user ID.'},
-            'email': {'help_text': 'User's email address.'},
-            'first_name': {'help_text': 'User's first name.'},
-            'last_name': {'help_text': 'User's last name.'},
-            'avatar_url': {'help_text': 'URL to user's profile picture (from Google or Gravatar).'},
+            'email': {'help_text': 'User\'s email address.'},
+            'first_name': {'help_text': 'User\'s first name.'},
+            'last_name': {'help_text': 'User\'s last name.'},
+            'avatar_url': {'help_text': 'URL to user\'s profile picture (from Google or Gravatar).'},
             'is_staff': {'help_text': 'Whether user has staff privileges.'},
             'date_joined': {'help_text': 'Date and time when the account was created.'},
         }
