@@ -228,8 +228,17 @@ THUMBNAIL_SIZE = (300, 450)
 BACKDROP_SIZE = (1280, 720)
 
 
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:4200",       # Angular dev server
+    "http://127.0.0.1:4200",
+    "https://ikigembe-backend.onrender.com",  # Production (update with your frontend domain)
+]
+
+CORS_ALLOW_CREDENTIALS = True
+
 CSRF_TRUSTED_ORIGINS = [
     "https://ikigembe-backend.onrender.com",
+    "http://localhost:4200",
 ]
 
 
