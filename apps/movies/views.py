@@ -16,10 +16,34 @@ import boto3
 import uuid
 import os
 from rest_framework.authentication import SessionAuthentication
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
+from drf_spectacular.types import OpenApiTypes
 
 
 class DiscoverMoviesView(APIView):
     """General movie discovery endpoint"""
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+            OpenApiParameter(
+                name='sort_by',
+                description='Sort movies by: popularity.desc (default), release_date.desc, or rating.desc',
+                required=False,
+                type=OpenApiTypes.STR,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Discover movies',
+        description='Get a list of active movies with optional sorting and pagination.',
+    )
     def get(self, request):
         page = int(request.GET.get('page', 1))
         sort_by = request.GET.get('sort_by', 'popularity.desc')
@@ -54,6 +78,21 @@ class DiscoverMoviesView(APIView):
 
 class PopularMoviesView(APIView):
     """Most viewed movies"""
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get popular movies',
+        description='Get a list of the most viewed movies.',
+    )
     def get(self, request):
         page = int(request.GET.get('page', 1))
         page_size = 20
@@ -76,6 +115,21 @@ class PopularMoviesView(APIView):
 
 class NowPlayingMoviesView(APIView):
     """Recently added movies"""
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get now playing movies',
+        description='Get a list of recently added movies.',
+    )
     def get(self, request):
         page = int(request.GET.get('page', 1))
         page_size = 20
@@ -98,6 +152,21 @@ class NowPlayingMoviesView(APIView):
 
 class TopRatedMoviesView(APIView):
     """Highest rated movies"""
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get top rated movies',
+        description='Get a list of the highest rated movies (rating >= 4.0).',
+    )
     def get(self, request):
         page = int(request.GET.get('page', 1))
         page_size = 20
@@ -120,6 +189,21 @@ class TopRatedMoviesView(APIView):
 
 class UpcomingMoviesView(APIView):
     """Movies with future release dates"""
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get upcoming movies',
+        description='Get a list of movies with future release dates, sorted by release date.',
+    )
     def get(self, request):
         page = int(request.GET.get('page', 1))
         page_size = 20
@@ -147,6 +231,21 @@ class UpcomingMoviesView(APIView):
 
 class MovieDetailView(APIView):
     """Detailed movie information - includes trailer"""
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='id',
+                description='Movie ID',
+                required=True,
+                type=OpenApiTypes.INT,
+                location='path'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get movie details',
+        description='Get detailed information about a specific movie including title, description, rating, cast, etc.',
+    )
     def get(self, request, id):
         try:
             movie = Movie.objects.get(id=id, is_active=True)
@@ -164,6 +263,21 @@ class MovieVideosView(APIView):
     Get video information for a movie.
     Returns trailer (always accessible) and full video info.
     """
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='id',
+                description='Movie ID',
+                required=True,
+                type=OpenApiTypes.INT,
+                location='path'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get movie videos',
+        description='Get video URLs and metadata for a movie (trailer and full movie if authenticated).',
+    )
     def get(self, request, id):
         try:
             movie = Movie.objects.get(id=id, is_active=True)

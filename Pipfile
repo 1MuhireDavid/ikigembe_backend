@@ -17,6 +17,7 @@ djangorestframework-simplejwt = "*"
 google-auth = {extras = ["requests"], version = "*"}
 dotenv = "*"
 django = "*"
+python-dotenv = "*"
 
 [dev-packages]
 
