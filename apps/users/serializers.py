@@ -9,7 +9,7 @@ User = get_user_model()
 class UserSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(
         read_only=True,
-        help_text='User's full name (concatenation of first and last name).'
+        help_text='User\'s full name (concatenation of first and last name).'
     )
 
     class Meta:
@@ -58,11 +58,11 @@ class RegisterSerializer(serializers.ModelSerializer):
                 }
             },
             'first_name': {
-                'help_text': 'User's first name (optional).',
+                'help_text': 'User\'s first name (optional).',
                 'required': False,
             },
             'last_name': {
-                'help_text': 'User's last name (optional).',
+                'help_text': 'User\'s last name (optional).',
                 'required': False,
             },
         }
