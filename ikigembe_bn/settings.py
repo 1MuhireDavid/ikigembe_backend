@@ -96,22 +96,25 @@ SPECTACULAR_SETTINGS = {
     'TITLE': 'Ikigembe API',
     'DESCRIPTION': 'API documentation for Ikigembe Backend',
     'VERSION': '1.0.0',
-    'SERVE_INCLUDE_SCHEMA': True,  # Enable /schema/ endpoint
+    'SERVE_INCLUDE_SCHEMA': True,
+
     'SERVERS': [
         {
-            'url': 'http://localhost:8000/api',
+            'url': 'http://localhost:8000',
             'description': 'Development server',
         },
         {
-            'url': 'https://ikigembe-backend.onrender.com/api',
+            'url': 'https://ikigembe-backend.onrender.com',
             'description': 'Production server',
         },
     ],
+
     'SECURITY': [
         {
             'bearerAuth': [],
         }
     ],
+
     'COMPONENTS': {
         'securitySchemes': {
             'bearerAuth': {
@@ -122,16 +125,13 @@ SPECTACULAR_SETTINGS = {
             }
         }
     },
-    'PREPROCESSING_HOOKS': [
-        'drf_spectacular.hooks.build_mock_request_for_drf_spectacular',
-    ],
+
     'POSTPROCESSING_HOOKS': [
         'drf_spectacular.hooks.postprocess_schema_enum_fields',
     ],
+
     'SCHEMA_PATH_PREFIX': r'/api',
     'DEFAULT_GENERATOR_CLASS': 'drf_spectacular.generators.SchemaGenerator',
-    'ENUM_ADD_CHOICES': True,
-    'ENUM_GENERATE_CHOICE_DESCRIPTION': True,
 }
 
 
