@@ -127,10 +127,8 @@ SPECTACULAR_SETTINGS = {
     },
 
     'POSTPROCESSING_HOOKS': [
-        'drf_spectacular.hooks.postprocess_schema_enum_fields',
+        'drf_spectacular.hooks.postprocess_schema_enums',
     ],
-
-    'SCHEMA_PATH_PREFIX': r'/api',
     'DEFAULT_GENERATOR_CLASS': 'drf_spectacular.generators.SchemaGenerator',
 }
 
