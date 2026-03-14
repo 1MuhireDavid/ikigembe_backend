@@ -119,3 +119,8 @@ class GoogleAuthSerializer(serializers.Serializer):
     id_token = serializers.CharField(
         help_text='Google ID token obtained from the frontend Google Sign-In flow.'
     )
+
+class RefreshSerializer(serializers.Serializer):
+    refresh = serializers.CharField(
+        help_text="The refresh token obtained during login or registration"
+    )
