@@ -10,12 +10,13 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from drf_spectacular.types import OpenApiTypes
-
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
 from .serializers import (
     GoogleAuthSerializer,
     LoginSerializer,
     RegisterSerializer,
     UserSerializer,
+    RefreshSerializer
 )
 
 User = get_user_model()
@@ -75,29 +76,35 @@ class RegisterView(APIView):
         summary='Register a new user account',
         description='Create a new user with email and password. Passwords must be strong (8+ chars, mixed case, numbers, symbols).',
         examples=[
-            {
-                'request': {
-                    'email': 'user@example.com',
-                    'password': 'SecurePass123!',
-                    'password_confirm': 'SecurePass123!',
-                    'first_name': 'John',
-                    'last_name': 'Doe',
+            OpenApiExample(
+                "Register Request",
+                value={
+                    "email": "user@example.com",
+                    "password": "SecurePass123!",
+                    "password_confirm": "SecurePass123!",
+                    "first_name": "John",
+                    "last_name": "Doe"
                 },
-                'response': {
-                    'access': 'eyJ0eXAiOiJKV1QiLCJhbGc...',
-                    'refresh': 'eyJ0eXAiOiJKV1QiLCJhbGc...',
-                    'user': {
-                        'id': 1,
-                        'email': 'user@example.com',
-                        'first_name': 'John',
-                        'last_name': 'Doe',
-                        'full_name': 'John Doe',
-                        'avatar_url': None,
-                        'is_staff': False,
-                        'date_joined': '2024-03-14T10:30:00Z',
+                request_only=True,
+            ),
+            OpenApiExample(
+                "Register Response",
+                value={
+                    "access": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                    "refresh": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                    "user": {
+                        "id": 1,
+                        "email": "user@example.com",
+                        "first_name": "John",
+                        "last_name": "Doe",
+                        "full_name": "John Doe",
+                        "avatar_url": None,
+                        "is_staff": False,
+                        "date_joined": "2024-03-14T10:30:00Z"
                     }
-                }
-            }
+                },
+                response_only=True,
+            ),
         ],
     )
     def post(self, request):
@@ -250,24 +257,14 @@ class TokenRefreshView(APIView):
     permission_classes = [AllowAny]
 
     @extend_schema(
-        request={
-            'type': 'object',
-            'properties': {
-                'refresh': {
-                    'type': 'string',
-                    'description': 'The refresh token obtained during login or registration',
-                }
-            },
-            'required': ['refresh'],
-        },
-        responses={
-            200: OpenApiResponse(description='New access token generated'),
-            400: OpenApiResponse(description='Refresh token is required'),
-            401: OpenApiResponse(description='Invalid or expired refresh token'),
-        },
-        tags=['Authentication'],
-        summary='Refresh access token',
-        description='Use a valid refresh token to get a new access token. Optionally returns a new refresh token.',
+    request=RefreshSerializer,
+    responses={
+        200: OpenApiResponse(description="New access token generated"),
+        400: OpenApiResponse(description="Refresh token is required"),
+        401: OpenApiResponse(description="Invalid or expired refresh token"),
+    },
+    tags=["Authentication"],
+    summary="Refresh access token",
     )
     def post(self, request):
         refresh_token = request.data.get('refresh')
@@ -309,10 +306,6 @@ class MeView(APIView):
         return Response(serializer.data)
 
 
-# ─────────────────────────────────────────────
-# Logout (blacklist refresh token)
-# ─────────────────────────────────────────────
-
 class LogoutView(APIView):
     """
     Invalidate the provided refresh token.
@@ -320,25 +313,16 @@ class LogoutView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+
     @extend_schema(
-        request={
-            'type': 'object',
-            'properties': {
-                'refresh': {
-                    'type': 'string',
-                    'description': 'The refresh token to invalidate',
-                }
-            },
-            'required': ['refresh'],
-        },
+        request=RefreshSerializer,
         responses={
-            205: OpenApiResponse(description='Successfully logged out'),
-            400: OpenApiResponse(description='Refresh token is required'),
-            401: OpenApiResponse(description='Authentication credentials were not provided'),
+            205: OpenApiResponse(description="Successfully logged out"),
+            400: OpenApiResponse(description="Refresh token is required"),
+            401: OpenApiResponse(description="Authentication credentials were not provided"),
         },
-        tags=['Authentication'],
-        summary='Logout user',
-        description='Invalidate the refresh token and logout. The access token will expire on its own.',
+        tags=["Authentication"],
+        summary="Logout user",
     )
     def post(self, request):
         refresh_token = request.data.get('refresh')
