@@ -18,6 +18,7 @@ google-auth = {extras = ["requests"], version = "*"}
 dotenv = "*"
 django = "*"
 python-dotenv = "*"
+whitenoise = "*"
 
 [dev-packages]
 
