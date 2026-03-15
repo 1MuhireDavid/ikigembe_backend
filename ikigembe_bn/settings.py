@@ -56,6 +56,7 @@ AUTH_USER_MODEL = 'users.User'
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -196,10 +197,7 @@ USE_I18N = True
 USE_TZ = True
 
 
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/6.0/howto/static-files/
 
-STATIC_URL = 'static/'
 
 # Determine storage based on USE_S3 setting (not DEBUG)
 USE_S3 = True 
@@ -223,6 +221,8 @@ AWS_LOCATION = ''  # No prefix — files stored at root of bucket (e.g. movies/b
 AWS_S3_FILE_OVERWRITE = False
 AWS_QUERYSTRING_AUTH = False
 
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / "staticfiles"
 # FORCE S3 storage (this is the critical line)
 # DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
 
@@ -231,7 +231,7 @@ STORAGES = {
         "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
     },
     "staticfiles": {
-        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
 }
 
