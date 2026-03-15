@@ -74,6 +74,7 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',
@@ -255,12 +256,12 @@ CORS_ALLOW_CREDENTIALS = True
 
 CSRF_TRUSTED_ORIGINS = [
     "https://ikigembe-backend.onrender.com",
-    "http://localhost:4200",
+    "http://localhost:4200"
 ]
 
 
 # Security settings
-SECURE_CROSS_ORIGIN_OPENER_POLICY = None  # Allow video embedding
+SECURE_CROSS_ORIGIN_OPENER_POLICY = None
 X_FRAME_OPTIONS = 'SAMEORIGIN'
 
 # Default primary key field type
