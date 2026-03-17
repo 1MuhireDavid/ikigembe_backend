@@ -26,11 +26,15 @@ from .serializers import (
     MovieVideoAccessSerializer,
     MovieCreateSerializer,
 )
+from rest_framework.permissions import IsAdminUser
+from django.conf import settings
+import boto3
+import uuid
+import os
+from rest_framework.authentication import SessionAuthentication
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
+from drf_spectacular.types import OpenApiTypes
 
-
-# ─────────────────────────────────────────────
-# Shared helpers
-# ─────────────────────────────────────────────
 
 _PAGE_PARAM = OpenApiParameter('page', OpenApiTypes.INT, description='Page number (default: 1)', required=False)
 _SORT_PARAM = OpenApiParameter(
@@ -66,13 +70,27 @@ def _paginate(queryset, request):
 
 class DiscoverMoviesView(APIView):
     """General movie discovery endpoint"""
-
+    
     @extend_schema(
-        tags=['Movies - Discovery'],
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+            OpenApiParameter(
+                name='sort_by',
+                description='Sort movies by: popularity.desc (default), release_date.desc, or rating.desc',
+                required=False,
+                type=OpenApiTypes.STR,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
         summary='Discover movies',
-        description='Browse all active movies. Supports sort and pagination.',
-        parameters=[_PAGE_PARAM, _SORT_PARAM],
-        responses={200: _PAGINATED_RESPONSE},
+        description='Get a list of active movies with optional sorting and pagination.',
     )
     def get(self, request):
         sort_by = request.GET.get('sort_by', 'popularity.desc')
@@ -98,13 +116,20 @@ class DiscoverMoviesView(APIView):
 
 class PopularMoviesView(APIView):
     """Most viewed movies"""
-
+    
     @extend_schema(
-        tags=['Movies - Discovery'],
-        summary='Popular movies',
-        description='Returns active movies ordered by view count (descending).',
-        parameters=[_PAGE_PARAM],
-        responses={200: _PAGINATED_RESPONSE},
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get popular movies',
+        description='Get a list of the most viewed movies.',
     )
     def get(self, request):
         movies = Movie.objects.filter(is_active=True).order_by('-views')
@@ -119,13 +144,20 @@ class PopularMoviesView(APIView):
 
 class NowPlayingMoviesView(APIView):
     """Recently added movies"""
-
+    
     @extend_schema(
-        tags=['Movies - Discovery'],
-        summary='Now playing',
-        description='Returns the most recently added active movies.',
-        parameters=[_PAGE_PARAM],
-        responses={200: _PAGINATED_RESPONSE},
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get now playing movies',
+        description='Get a list of recently added movies.',
     )
     def get(self, request):
         movies = Movie.objects.filter(is_active=True).order_by('-created_at')
@@ -140,13 +172,20 @@ class NowPlayingMoviesView(APIView):
 
 class TopRatedMoviesView(APIView):
     """Highest rated movies"""
-
+    
     @extend_schema(
-        tags=['Movies - Discovery'],
-        summary='Top rated movies',
-        description='Returns movies with a rating of 4.0 or higher, ordered by rating.',
-        parameters=[_PAGE_PARAM],
-        responses={200: _PAGINATED_RESPONSE},
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get top rated movies',
+        description='Get a list of the highest rated movies (rating >= 4.0).',
     )
     def get(self, request):
         movies = Movie.objects.filter(is_active=True, rating__gte=4.0).order_by('-rating')
@@ -161,13 +200,20 @@ class TopRatedMoviesView(APIView):
 
 class UpcomingMoviesView(APIView):
     """Movies with future release dates"""
-
+    
     @extend_schema(
-        tags=['Movies - Discovery'],
-        summary='Upcoming movies',
-        description='Returns active movies with a release date in the future.',
-        parameters=[_PAGE_PARAM],
-        responses={200: _PAGINATED_RESPONSE},
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get upcoming movies',
+        description='Get a list of movies with future release dates, sorted by release date.',
     )
     def get(self, request):
         today = timezone.now().date()
@@ -186,16 +232,21 @@ class UpcomingMoviesView(APIView):
 # ─────────────────────────────────────────────
 
 class MovieDetailView(APIView):
-    """Detailed movie information"""
-
+    """Detailed movie information - includes trailer"""
+    
     @extend_schema(
-        tags=['Movies - Detail'],
+        parameters=[
+            OpenApiParameter(
+                name='id',
+                description='Movie ID',
+                required=True,
+                type=OpenApiTypes.INT,
+                location='path'
+            ),
+        ],
+        tags=['Movies'],
         summary='Get movie details',
-        description='Retrieve full details of a single active movie including cast, genres, and media URLs.',
-        responses={
-            200: MovieDetailSerializer,
-            404: OpenApiResponse(description='Movie not found'),
-        },
+        description='Get detailed information about a specific movie including title, description, rating, cast, etc.',
     )
     def get(self, request, id):
         try:
@@ -210,22 +261,24 @@ class MovieDetailView(APIView):
 # ─────────────────────────────────────────────
 
 class MovieVideosView(APIView):
-    """Get video information for a movie"""
-
+    """
+    Get video information for a movie.
+    Returns trailer (always accessible) and full video info.
+    """
+    
     @extend_schema(
-        tags=['Movies - Media'],
-        summary='Get movie videos',
-        description='Returns trailer and full-movie video metadata (URLs, duration, pricing).',
-        responses={
-            200: inline_serializer(
-                name='MovieVideosList',
-                fields={
-                    'id': drf_serializers.IntegerField(),
-                    'results': drf_serializers.ListField(child=drf_serializers.DictField()),
-                }
+        parameters=[
+            OpenApiParameter(
+                name='id',
+                description='Movie ID',
+                required=True,
+                type=OpenApiTypes.INT,
+                location='path'
             ),
-            404: OpenApiResponse(description='Movie not found'),
-        },
+        ],
+        tags=['Movies'],
+        summary='Get movie videos',
+        description='Get video URLs and metadata for a movie (trailer and full movie if authenticated).',
     )
     def get(self, request, id):
         try:
@@ -361,9 +414,6 @@ class MovieImagesView(APIView):
         })
 
 
-# ─────────────────────────────────────────────
-# Movie CRUD — Admin only
-# ─────────────────────────────────────────────
 
 class MovieCreateView(APIView):
     """
