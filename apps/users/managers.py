@@ -2,18 +2,28 @@ from django.contrib.auth.models import BaseUserManager
 
 
 class UserManager(BaseUserManager):
-    """Manager for email-based custom User model."""
+    """Manager for the custom User model (email or phone number as identifier)."""
 
-    def create_user(self, email, password=None, **extra_fields):
-        if not email:
-            raise ValueError('An email address is required.')
-        email = self.normalize_email(email)
+    def create_user(self, email=None, password=None, **extra_fields):
+        phone_number = extra_fields.get('phone_number')
+
+        if not email and not phone_number:
+            raise ValueError('Either an email address or a phone number is required.')
+
+        if email:
+            email = self.normalize_email(email)
+
+        if phone_number:
+            extra_fields['phone_number'] = phone_number.strip()
+
         extra_fields.setdefault('is_active', True)
         user = self.model(email=email, **extra_fields)
+
         if password:
             user.set_password(password)
         else:
             user.set_unusable_password()
+
         user.save(using=self._db)
         return user
 

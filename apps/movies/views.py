@@ -1,439 +1,676 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.utils import timezone
-from datetime import timedelta
-from .models import Movie
-from .serializers import (
-    MovieSerializer, 
-    MovieDetailSerializer,
-    MovieVideoAccessSerializer,
-    MovieCreateSerializer
-)
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAdminUser
+from rest_framework.authentication import SessionAuthentication
+from django.utils import timezone
 from django.conf import settings
+from drf_spectacular.utils import (
+    extend_schema,
+    OpenApiParameter,
+    OpenApiResponse,
+    inline_serializer,
+    OpenApiExample,
+)
+from drf_spectacular.types import OpenApiTypes
+from rest_framework import serializers as drf_serializers
 import boto3
 import uuid
 import os
-from rest_framework.authentication import SessionAuthentication
 
+from .models import Movie
+from .serializers import (
+    MovieSerializer,
+    MovieDetailSerializer,
+    MovieVideoAccessSerializer,
+    MovieCreateSerializer,
+)
+
+
+# ─────────────────────────────────────────────
+# Shared helpers
+# ─────────────────────────────────────────────
+
+_PAGE_PARAM = OpenApiParameter('page', OpenApiTypes.INT, description='Page number (default: 1)', required=False)
+_SORT_PARAM = OpenApiParameter(
+    'sort_by', OpenApiTypes.STR,
+    description='Sort order: popularity.desc | release_date.desc | rating.desc',
+    required=False,
+    enum=['popularity.desc', 'release_date.desc', 'rating.desc'],
+)
+
+_PAGINATED_RESPONSE = inline_serializer(
+    name='PaginatedMovieList',
+    fields={
+        'page': drf_serializers.IntegerField(),
+        'results': MovieSerializer(many=True),
+        'total_results': drf_serializers.IntegerField(),
+        'total_pages': drf_serializers.IntegerField(),
+    }
+)
+
+
+def _paginate(queryset, request):
+    """Helper: paginate a queryset and return (page, page_size, slice)."""
+    page = int(request.GET.get('page', 1))
+    page_size = 20
+    start = (page - 1) * page_size
+    total = queryset.count()
+    return page, total, queryset[start:start + page_size]
+
+
+# ─────────────────────────────────────────────
+# Discovery / List endpoints
+# ─────────────────────────────────────────────
 
 class DiscoverMoviesView(APIView):
     """General movie discovery endpoint"""
+
+    @extend_schema(
+        tags=['Movies - Discovery'],
+        summary='Discover movies',
+        description='Browse all active movies. Supports sort and pagination.',
+        parameters=[_PAGE_PARAM, _SORT_PARAM],
+        responses={200: _PAGINATED_RESPONSE},
+    )
     def get(self, request):
-        page = int(request.GET.get('page', 1))
         sort_by = request.GET.get('sort_by', 'popularity.desc')
-        
         movies = Movie.objects.filter(is_active=True)
-        
-        if sort_by == 'popularity.desc':
-            movies = movies.order_by('-views')
-        elif sort_by == 'release_date.desc':
-            movies = movies.order_by('-release_date')
-        elif sort_by == 'rating.desc':
-            movies = movies.order_by('-rating')
-        else:
-            movies = movies.order_by('-views')
-        
-        page_size = 20
-        start = (page - 1) * page_size
-        end = start + page_size
-        
-        total_results = movies.count()
-        movies_page = movies[start:end]
-        
+
+        order_map = {
+            'popularity.desc': '-views',
+            'release_date.desc': '-release_date',
+            'rating.desc': '-rating',
+        }
+        movies = movies.order_by(order_map.get(sort_by, '-views'))
+
+        page, total, movies_page = _paginate(movies, request)
         serializer = MovieSerializer(movies_page, many=True)
-        
+
         return Response({
             'page': page,
             'results': serializer.data,
-            'total_results': total_results,
-            'total_pages': (total_results + page_size - 1) // page_size
+            'total_results': total,
+            'total_pages': (total + 19) // 20,
         })
 
 
 class PopularMoviesView(APIView):
     """Most viewed movies"""
+
+    @extend_schema(
+        tags=['Movies - Discovery'],
+        summary='Popular movies',
+        description='Returns active movies ordered by view count (descending).',
+        parameters=[_PAGE_PARAM],
+        responses={200: _PAGINATED_RESPONSE},
+    )
     def get(self, request):
-        page = int(request.GET.get('page', 1))
-        page_size = 20
-        start = (page - 1) * page_size
-        end = start + page_size
-        
         movies = Movie.objects.filter(is_active=True).order_by('-views')
-        total_results = movies.count()
-        movies_page = movies[start:end]
-        
-        serializer = MovieSerializer(movies_page, many=True)
-        
+        page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
-            'results': serializer.data,
-            'total_results': total_results,
-            'total_pages': (total_results + page_size - 1) // page_size
+            'results': MovieSerializer(movies_page, many=True).data,
+            'total_results': total,
+            'total_pages': (total + 19) // 20,
         })
 
 
 class NowPlayingMoviesView(APIView):
     """Recently added movies"""
+
+    @extend_schema(
+        tags=['Movies - Discovery'],
+        summary='Now playing',
+        description='Returns the most recently added active movies.',
+        parameters=[_PAGE_PARAM],
+        responses={200: _PAGINATED_RESPONSE},
+    )
     def get(self, request):
-        page = int(request.GET.get('page', 1))
-        page_size = 20
-        start = (page - 1) * page_size
-        end = start + page_size
-        
         movies = Movie.objects.filter(is_active=True).order_by('-created_at')
-        total_results = movies.count()
-        movies_page = movies[start:end]
-        
-        serializer = MovieSerializer(movies_page, many=True)
-        
+        page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
-            'results': serializer.data,
-            'total_results': total_results,
-            'total_pages': (total_results + page_size - 1) // page_size
+            'results': MovieSerializer(movies_page, many=True).data,
+            'total_results': total,
+            'total_pages': (total + 19) // 20,
         })
 
 
 class TopRatedMoviesView(APIView):
     """Highest rated movies"""
+
+    @extend_schema(
+        tags=['Movies - Discovery'],
+        summary='Top rated movies',
+        description='Returns movies with a rating of 4.0 or higher, ordered by rating.',
+        parameters=[_PAGE_PARAM],
+        responses={200: _PAGINATED_RESPONSE},
+    )
     def get(self, request):
-        page = int(request.GET.get('page', 1))
-        page_size = 20
-        start = (page - 1) * page_size
-        end = start + page_size
-        
         movies = Movie.objects.filter(is_active=True, rating__gte=4.0).order_by('-rating')
-        total_results = movies.count()
-        movies_page = movies[start:end]
-        
-        serializer = MovieSerializer(movies_page, many=True)
-        
+        page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
-            'results': serializer.data,
-            'total_results': total_results,
-            'total_pages': (total_results + page_size - 1) // page_size
+            'results': MovieSerializer(movies_page, many=True).data,
+            'total_results': total,
+            'total_pages': (total + 19) // 20,
         })
 
 
 class UpcomingMoviesView(APIView):
     """Movies with future release dates"""
+
+    @extend_schema(
+        tags=['Movies - Discovery'],
+        summary='Upcoming movies',
+        description='Returns active movies with a release date in the future.',
+        parameters=[_PAGE_PARAM],
+        responses={200: _PAGINATED_RESPONSE},
+    )
     def get(self, request):
-        page = int(request.GET.get('page', 1))
-        page_size = 20
-        start = (page - 1) * page_size
-        end = start + page_size
-        
         today = timezone.now().date()
-        movies = Movie.objects.filter(
-            is_active=True,
-            release_date__gte=today
-        ).order_by('release_date')
-        
-        total_results = movies.count()
-        movies_page = movies[start:end]
-        
-        serializer = MovieSerializer(movies_page, many=True)
-        
+        movies = Movie.objects.filter(is_active=True, release_date__gte=today).order_by('release_date')
+        page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
-            'results': serializer.data,
-            'total_results': total_results,
-            'total_pages': (total_results + page_size - 1) // page_size
+            'results': MovieSerializer(movies_page, many=True).data,
+            'total_results': total,
+            'total_pages': (total + 19) // 20,
         })
 
 
+# ─────────────────────────────────────────────
+# Movie Detail
+# ─────────────────────────────────────────────
+
 class MovieDetailView(APIView):
-    """Detailed movie information - includes trailer"""
+    """Detailed movie information"""
+
+    @extend_schema(
+        tags=['Movies - Detail'],
+        summary='Get movie details',
+        description='Retrieve full details of a single active movie including cast, genres, and media URLs.',
+        responses={
+            200: MovieDetailSerializer,
+            404: OpenApiResponse(description='Movie not found'),
+        },
+    )
     def get(self, request, id):
         try:
             movie = Movie.objects.get(id=id, is_active=True)
-            serializer = MovieDetailSerializer(movie)
-            return Response(serializer.data)
+            return Response(MovieDetailSerializer(movie).data)
         except Movie.DoesNotExist:
-            return Response(
-                {'error': 'Movie not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
 
+
+# ─────────────────────────────────────────────
+# Media endpoints
+# ─────────────────────────────────────────────
 
 class MovieVideosView(APIView):
-    """
-    Get video information for a movie.
-    Returns trailer (always accessible) and full video info.
-    """
+    """Get video information for a movie"""
+
+    @extend_schema(
+        tags=['Movies - Media'],
+        summary='Get movie videos',
+        description='Returns trailer and full-movie video metadata (URLs, duration, pricing).',
+        responses={
+            200: inline_serializer(
+                name='MovieVideosList',
+                fields={
+                    'id': drf_serializers.IntegerField(),
+                    'results': drf_serializers.ListField(child=drf_serializers.DictField()),
+                }
+            ),
+            404: OpenApiResponse(description='Movie not found'),
+        },
+    )
     def get(self, request, id):
         try:
             movie = Movie.objects.get(id=id, is_active=True)
-
-            videos = []
-
-            # Add trailer if available
-            if movie.trailer_file:
-                videos.append({
-                    'url': movie.trailer_url,   # CloudFront/S3 URL
-                    'name': f'{movie.title} - Trailer',
-                    'type': 'Trailer',
-                    'site': 'Local',
-                    'duration_seconds': movie.trailer_duration_seconds,
-                    'is_free': True
-                })
-
-            # Add full video info
-            if movie.video_file:
-                videos.append({
-                    'url': movie.video_url,     # CloudFront/S3 URL
-                    'name': f'{movie.title} - Full Movie',
-                    'type': 'Full Movie',
-                    'site': 'Local',
-                    'duration_minutes': movie.duration_minutes,
-                    'requires_payment': True,
-                    'price': movie.price
-                })
-
-            return Response({
-                'id': movie.id,
-                'results': videos
-            })
         except Movie.DoesNotExist:
-            return Response(
-                {'error': 'Movie not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        videos = []
+        if movie.trailer_file:
+            videos.append({
+                'url': movie.trailer_url,
+                'name': f'{movie.title} - Trailer',
+                'type': 'Trailer',
+                'site': 'Local',
+                'duration_seconds': movie.trailer_duration_seconds,
+                'is_free': True,
+            })
+        if movie.video_file:
+            videos.append({
+                'url': movie.video_url,
+                'name': f'{movie.title} - Full Movie',
+                'type': 'Full Movie',
+                'site': 'Local',
+                'duration_minutes': movie.duration_minutes,
+                'requires_payment': True,
+                'price': movie.price,
+            })
+
+        return Response({'id': movie.id, 'results': videos})
 
 
 class MovieStreamView(APIView):
-    """
-    Get streaming URL for full movie.
-    In development: Always grants access.
-    In production: Verify payment before granting access.
-    """
+    """Get full-movie streaming URL"""
+
+    @extend_schema(
+        tags=['Movies - Media'],
+        summary='Stream full movie',
+        description=(
+            'Returns the full-movie streaming URL and increments the view counter. '
+            '**Development mode** — payment check is disabled.'
+        ),
+        responses={
+            200: MovieVideoAccessSerializer,
+            404: OpenApiResponse(description='Movie not found'),
+        },
+    )
     def get(self, request, id):
         try:
             movie = Movie.objects.get(id=id, is_active=True)
-
-            # TODO: In production, check payment status
-            # if not self.has_user_paid(request.user, movie):
-            #     return Response(
-            #         {'error': 'Payment required', 'price': movie.price},
-            #         status=status.HTTP_402_PAYMENT_REQUIRED
-            #     )
-
-            # Increment view count
-            movie.increment_views()
-
-            serializer = MovieVideoAccessSerializer(
-                movie,
-                context={'request': request}
-            )
-
-            return Response({
-                'movie': serializer.data,
-                'stream_url': movie.video_url,  # CloudFront/S3 absolute URL
-                'message': 'Development mode - payment not required'
-            })
-
         except Movie.DoesNotExist:
-            return Response(
-                {'error': 'Movie not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        movie.increment_views()
+        serializer = MovieVideoAccessSerializer(movie, context={'request': request})
+        return Response({
+            'movie': serializer.data,
+            'stream_url': movie.video_url,
+            'message': 'Development mode - payment not required',
+        })
 
 
 class MovieTrailerView(APIView):
-    """
-    Get trailer streaming URL - always free.
-    """
+    """Get free trailer streaming URL"""
+
+    @extend_schema(
+        tags=['Movies - Media'],
+        summary='Stream trailer',
+        description='Returns the free trailer streaming URL for a movie.',
+        responses={
+            200: inline_serializer(
+                name='TrailerResponse',
+                fields={
+                    'id': drf_serializers.IntegerField(),
+                    'title': drf_serializers.CharField(),
+                    'stream_url': drf_serializers.URLField(),
+                    'duration_seconds': drf_serializers.IntegerField(),
+                    'is_free': drf_serializers.BooleanField(),
+                }
+            ),
+            404: OpenApiResponse(description='Movie or trailer not found'),
+        },
+    )
     def get(self, request, id):
         try:
             movie = Movie.objects.get(id=id, is_active=True)
-
-            if not movie.trailer_file:
-                return Response(
-                    {'error': 'Trailer not available for this movie'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-
-            return Response({
-                'id': movie.id,
-                'title': movie.title,
-                'stream_url': movie.trailer_url,  # CloudFront/S3 absolute URL
-                'duration_seconds': movie.trailer_duration_seconds,
-                'is_free': True
-            })
-
         except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not movie.trailer_file:
             return Response(
-                {'error': 'Movie not found'},
+                {'error': 'Trailer not available for this movie'},
                 status=status.HTTP_404_NOT_FOUND
             )
+
+        return Response({
+            'id': movie.id,
+            'title': movie.title,
+            'stream_url': movie.trailer_url,
+            'duration_seconds': movie.trailer_duration_seconds,
+            'is_free': True,
+        })
 
 
 class MovieImagesView(APIView):
-    """Get image information for a movie"""
+    """Get image URLs for a movie"""
+
+    @extend_schema(
+        tags=['Movies - Media'],
+        summary='Get movie images',
+        description='Returns backdrop and poster (thumbnail) URLs for a movie.',
+        responses={
+            200: inline_serializer(
+                name='MovieImages',
+                fields={
+                    'id': drf_serializers.IntegerField(),
+                    'backdrops': drf_serializers.ListField(child=drf_serializers.DictField()),
+                    'posters': drf_serializers.ListField(child=drf_serializers.DictField()),
+                }
+            ),
+            404: OpenApiResponse(description='Movie not found'),
+        },
+    )
     def get(self, request, id):
         try:
             movie = Movie.objects.get(id=id, is_active=True)
-            return Response({
-                'id': movie.id,
-                'backdrops': [
-                    {
-                        'file_path': movie.backdrop_url,
-                        'width': 1280,
-                        'height': 720
-                    }
-                ] if movie.backdrop_url else [],
-                'posters': [
-                    {
-                        'file_path': movie.thumbnail_url,
-                        'width': 300,
-                        'height': 450
-                    }
-                ]
-            })
         except Movie.DoesNotExist:
-            return Response(
-                {'error': 'Movie not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        return Response({
+            'id': movie.id,
+            'backdrops': [{'file_path': movie.backdrop_url, 'width': 1280, 'height': 720}] if movie.backdrop_url else [],
+            'posters': [{'file_path': movie.thumbnail_url, 'width': 300, 'height': 450}],
+        })
+
+
+# ─────────────────────────────────────────────
+# Movie CRUD — Admin only
+# ─────────────────────────────────────────────
 
 class MovieCreateView(APIView):
     """
-    Create a new movie
-    Accepts multipart/form-data for file uploads
+    Create a new movie with file uploads.
+    Send as multipart/form-data. Requires admin auth.
     """
-    # parser_classes = (MultiPartParser, FormParser) # APIView doesn't have default parsers for everything, but usually REST_FRAMEWORK defaults include them. 
-    # Better to interpret explicit parsers if we want to be safe, but let's stick to standard APIView for now or use CreateAPIView which is better.
-    
+    parser_classes = [MultiPartParser, FormParser]
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(
+        tags=['Movies - Admin'],
+        summary='Create a new movie',
+        description=(
+            'Upload a new movie with all its media files in one request.\n\n'
+            'Send the request as **multipart/form-data**.\n\n'
+            '**Required:** `title`, `overview`, `release_date`, `thumbnail`, `video_file`\n\n'
+            '**Optional:** `backdrop`, `trailer_file`, `price`, `duration_minutes`, '
+            '`trailer_duration_seconds`, `cast`, `genres`, `producer`, `is_active`, `has_free_preview`\n\n'
+            '`cast` and `genres` — send as a JSON array string, e.g. `["Action", "Drama"]`'
+        ),
+        request={
+            'multipart/form-data': MovieCreateSerializer,
+        },
+        responses={
+            201: MovieDetailSerializer,
+            400: OpenApiResponse(description='Validation error'),
+            403: OpenApiResponse(description='Admin access required'),
+        },
+        examples=[
+            OpenApiExample(
+                'Example — Kigali Story',
+                value={
+                    'title': 'Kigali Story',
+                    'overview': 'A drama set in post-genocide Rwanda.',
+                    'release_date': '2024-06-01',
+                    'price': 1000,
+                    'duration_minutes': 112,
+                    'genres': '["Drama", "History"]',
+                    'cast': '["Umuhire Clarisse", "Hakizimana Eric"]',
+                    'producer': 'Rwanda Film Studios',
+                    'has_free_preview': True,
+                    'is_active': True,
+                },
+                request_only=True,
+            ),
+        ],
+    )
     def post(self, request):
         serializer = MovieCreateSerializer(data=request.data)
         if serializer.is_valid():
             movie = serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            return Response(MovieDetailSerializer(movie).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+class MovieUpdateView(APIView):
+    """
+    Partially update an existing movie.
+    All fields optional — send only what you want to change.
+    Requires admin auth.
+    """
+    parser_classes = [MultiPartParser, FormParser]
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(
+        tags=['Movies - Admin'],
+        summary='Update a movie (partial)',
+        description=(
+            'Partially update a movie. Send only the fields you want to change as **multipart/form-data**. '
+            'File fields replace the existing file when provided.'
+        ),
+        request={
+            'multipart/form-data': MovieCreateSerializer,
+        },
+        responses={
+            200: MovieDetailSerializer,
+            400: OpenApiResponse(description='Validation error'),
+            403: OpenApiResponse(description='Admin access required'),
+            404: OpenApiResponse(description='Movie not found'),
+        },
+    )
+    def patch(self, request, id):
+        try:
+            movie = Movie.objects.get(id=id)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = MovieCreateSerializer(movie, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            movie.refresh_from_db()
+            return Response(MovieDetailSerializer(movie).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class MovieDeleteView(APIView):
+    """
+    Delete a movie record.
+    Note: S3 media files are NOT deleted automatically.
+    Requires admin auth.
+    """
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(
+        tags=['Movies - Admin'],
+        summary='Delete a movie',
+        description=(
+            'Permanently deletes a movie record from the database. '
+            '**Note:** media files stored in S3 are not removed automatically.'
+        ),
+        responses={
+            204: OpenApiResponse(description='Deleted successfully'),
+            403: OpenApiResponse(description='Admin access required'),
+            404: OpenApiResponse(description='Movie not found'),
+        },
+    )
+    def delete(self, request, id):
+        try:
+            movie = Movie.objects.get(id=id)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        movie.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ─────────────────────────────────────────────
+# S3 Multipart Upload — Admin only
+# ─────────────────────────────────────────────
+
+def _s3_client():
+    return boto3.client(
+        's3',
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_S3_REGION_NAME,
+    )
+
+
 class InitiateMultipartUploadView(APIView):
+    """Initiate an S3 multipart upload session for large video files."""
     authentication_classes = [SessionAuthentication]
     permission_classes = [IsAdminUser]
 
+    @extend_schema(
+        tags=['Movies - S3 Multipart Upload'],
+        summary='Initiate multipart upload',
+        description=(
+            'Starts a new S3 multipart upload and returns an `upload_id` and `file_key`. '
+            'Use these in all subsequent sign-part and complete calls. '
+            'Recommended for files larger than 100 MB.'
+        ),
+        request=inline_serializer(
+            name='InitiateUploadRequest',
+            fields={
+                'file_name': drf_serializers.CharField(help_text='Original filename, e.g. movie.mp4'),
+                'file_type': drf_serializers.CharField(help_text='MIME type, e.g. video/mp4'),
+                'field_name': drf_serializers.ChoiceField(
+                    choices=['video_file', 'trailer_file', 'thumbnail', 'backdrop'],
+                    help_text='Which movie field this file belongs to',
+                    required=False,
+                ),
+            }
+        ),
+        responses={
+            200: inline_serializer(
+                name='InitiateUploadResponse',
+                fields={
+                    'upload_id': drf_serializers.CharField(),
+                    'file_key': drf_serializers.CharField(),
+                }
+            ),
+            400: OpenApiResponse(description='Missing file_name or file_type'),
+        },
+    )
     def post(self, request):
         file_name = request.data.get('file_name')
         file_type = request.data.get('file_type')
-        
+
         if not file_name or not file_type:
             return Response({'error': 'Missing file_name or file_type'}, status=400)
 
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region_name=settings.AWS_S3_REGION_NAME
-        )
-
         field_name = request.data.get('field_name')
-
-        # Generate unique file path
         ext = os.path.splitext(file_name)[1]
         unique_filename = f"{uuid.uuid4()}{ext}"
-        
-        # Determine folder based on field name or file type
-        key = f"movies/uploads/{unique_filename}"
-        
-        if field_name == 'video_file':
-            key = f"movies/full/{unique_filename}"
-        elif field_name == 'trailer_file':
-            key = f"movies/trailers/{unique_filename}"
-        elif field_name == 'thumbnail':
-            key = f"movies/thumbnails/{unique_filename}"
-        elif field_name == 'backdrop':
-            key = f"movies/backdrops/{unique_filename}"
-        elif file_type.startswith('video/'):
-             key = f"movies/full/{unique_filename}"
-        elif file_type.startswith('image/'):
-             key = f"movies/thumbnails/{unique_filename}"
+
+        folder_map = {
+            'video_file': 'movies/full',
+            'trailer_file': 'movies/trailers',
+            'thumbnail': 'movies/thumbnails',
+            'backdrop': 'movies/backdrops',
+        }
+        folder = folder_map.get(field_name) or (
+            'movies/full' if file_type.startswith('video/') else
+            'movies/thumbnails' if file_type.startswith('image/') else
+            'movies/uploads'
+        )
+        key = f"{folder}/{unique_filename}"
 
         try:
-            mp_upload = s3_client.create_multipart_upload(
+            mp_upload = _s3_client().create_multipart_upload(
                 Bucket=settings.AWS_STORAGE_BUCKET_NAME,
                 Key=key,
-                ContentType=file_type
+                ContentType=file_type,
             )
-            
-            return Response({
-                'upload_id': mp_upload['UploadId'],
-                'file_key': key
-            })
+            return Response({'upload_id': mp_upload['UploadId'], 'file_key': key})
         except Exception as e:
             return Response({'error': str(e)}, status=500)
 
 
 class SignMultipartUploadPartView(APIView):
+    """Generate a pre-signed URL for uploading a single part."""
     authentication_classes = [SessionAuthentication]
     permission_classes = [IsAdminUser]
 
+    @extend_schema(
+        tags=['Movies - S3 Multipart Upload'],
+        summary='Sign an upload part',
+        description='Returns a pre-signed S3 URL for uploading one chunk. Expires in 1 hour.',
+        request=inline_serializer(
+            name='SignPartRequest',
+            fields={
+                'upload_id': drf_serializers.CharField(),
+                'file_key': drf_serializers.CharField(),
+                'part_number': drf_serializers.IntegerField(help_text='Part number (1-based index)'),
+            }
+        ),
+        responses={
+            200: inline_serializer(
+                name='SignPartResponse',
+                fields={'url': drf_serializers.URLField()}
+            ),
+            400: OpenApiResponse(description='Missing required fields'),
+        },
+    )
     def post(self, request):
-        data = request.data
-        upload_id = data.get('upload_id')
-        file_key = data.get('file_key')
-        part_number = data.get('part_number')
+        upload_id = request.data.get('upload_id')
+        file_key = request.data.get('file_key')
+        part_number = request.data.get('part_number')
 
         if not all([upload_id, file_key, part_number]):
             return Response({'error': 'Missing required fields'}, status=400)
 
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region_name=settings.AWS_S3_REGION_NAME
-        )
-
         try:
-            presigned_url = s3_client.generate_presigned_url(
+            url = _s3_client().generate_presigned_url(
                 ClientMethod='upload_part',
                 Params={
                     'Bucket': settings.AWS_STORAGE_BUCKET_NAME,
                     'Key': file_key,
                     'UploadId': upload_id,
-                    'PartNumber': int(part_number)
+                    'PartNumber': int(part_number),
                 },
-                ExpiresIn=3600
+                ExpiresIn=3600,
             )
-            
-            return Response({'url': presigned_url})
+            return Response({'url': url})
         except Exception as e:
             return Response({'error': str(e)}, status=500)
 
 
 class CompleteMultipartUploadView(APIView):
+    """Finalize a multipart upload after all parts have been uploaded."""
     authentication_classes = [SessionAuthentication]
     permission_classes = [IsAdminUser]
 
+    @extend_schema(
+        tags=['Movies - S3 Multipart Upload'],
+        summary='Complete multipart upload',
+        description='Assembles all uploaded parts into the final S3 object. Call this after every part is uploaded.',
+        request=inline_serializer(
+            name='CompleteUploadRequest',
+            fields={
+                'upload_id': drf_serializers.CharField(),
+                'file_key': drf_serializers.CharField(),
+                'parts': drf_serializers.ListField(
+                    child=inline_serializer(
+                        name='UploadPart',
+                        fields={
+                            'ETag': drf_serializers.CharField(),
+                            'PartNumber': drf_serializers.IntegerField(),
+                        }
+                    ),
+                    help_text='List of {ETag, PartNumber} pairs returned by S3 during each part upload',
+                ),
+            }
+        ),
+        responses={
+            200: inline_serializer(
+                name='CompleteUploadResponse',
+                fields={'status': drf_serializers.CharField()}
+            ),
+            400: OpenApiResponse(description='Missing required fields'),
+        },
+    )
     def post(self, request):
-        data = request.data
-        upload_id = data.get('upload_id')
-        file_key = data.get('file_key')
-        parts = data.get('parts') # List of {'ETag': '...', 'PartNumber': 1}
+        upload_id = request.data.get('upload_id')
+        file_key = request.data.get('file_key')
+        parts = request.data.get('parts')
 
         if not all([upload_id, file_key, parts]):
             return Response({'error': 'Missing required fields'}, status=400)
 
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region_name=settings.AWS_S3_REGION_NAME
-        )
-
         try:
-            s3_client.complete_multipart_upload(
+            _s3_client().complete_multipart_upload(
                 Bucket=settings.AWS_STORAGE_BUCKET_NAME,
                 Key=file_key,
                 UploadId=upload_id,
-                MultipartUpload={'Parts': parts}
+                MultipartUpload={'Parts': parts},
             )
             return Response({'status': 'complete'})
         except Exception as e:
@@ -441,29 +678,41 @@ class CompleteMultipartUploadView(APIView):
 
 
 class AbortMultipartUploadView(APIView):
+    """Cancel an in-progress multipart upload and free S3 storage."""
     authentication_classes = [SessionAuthentication]
     permission_classes = [IsAdminUser]
 
+    @extend_schema(
+        tags=['Movies - S3 Multipart Upload'],
+        summary='Abort multipart upload',
+        description='Cancels the multipart upload and releases any partially uploaded data from S3.',
+        request=inline_serializer(
+            name='AbortUploadRequest',
+            fields={
+                'upload_id': drf_serializers.CharField(),
+                'file_key': drf_serializers.CharField(),
+            }
+        ),
+        responses={
+            200: inline_serializer(
+                name='AbortUploadResponse',
+                fields={'status': drf_serializers.CharField()}
+            ),
+            400: OpenApiResponse(description='Missing required fields'),
+        },
+    )
     def post(self, request):
-        data = request.data
-        upload_id = data.get('upload_id')
-        file_key = data.get('file_key')
+        upload_id = request.data.get('upload_id')
+        file_key = request.data.get('file_key')
 
         if not all([upload_id, file_key]):
             return Response({'error': 'Missing required fields'}, status=400)
 
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region_name=settings.AWS_S3_REGION_NAME
-        )
-
         try:
-            s3_client.abort_multipart_upload(
+            _s3_client().abort_multipart_upload(
                 Bucket=settings.AWS_STORAGE_BUCKET_NAME,
                 Key=file_key,
-                UploadId=upload_id
+                UploadId=upload_id,
             )
             return Response({'status': 'aborted'})
         except Exception as e:
