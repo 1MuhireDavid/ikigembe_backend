@@ -2,6 +2,33 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser, FormParser
+<<<<<<< HEAD
+=======
+from rest_framework.permissions import IsAdminUser
+from rest_framework.authentication import SessionAuthentication
+from django.utils import timezone
+from django.conf import settings
+from drf_spectacular.utils import (
+    extend_schema,
+    OpenApiParameter,
+    OpenApiResponse,
+    inline_serializer,
+    OpenApiExample,
+)
+from drf_spectacular.types import OpenApiTypes
+from rest_framework import serializers as drf_serializers
+import boto3
+import uuid
+import os
+
+from .models import Movie
+from .serializers import (
+    MovieSerializer,
+    MovieDetailSerializer,
+    MovieVideoAccessSerializer,
+    MovieCreateSerializer,
+)
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
 from rest_framework.permissions import IsAdminUser
 from django.utils import timezone
 from django.conf import settings
@@ -17,6 +44,12 @@ from rest_framework import serializers as drf_serializers
 import boto3
 import uuid
 import os
+<<<<<<< HEAD
+=======
+from rest_framework.authentication import SessionAuthentication
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
+from drf_spectacular.types import OpenApiTypes
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
 
 from .models import Movie
 from .serializers import (
@@ -63,8 +96,41 @@ def _paginate(queryset, request):
 # Discovery / List endpoints
 # ─────────────────────────────────────────────
 
+_PAGE_PARAM = OpenApiParameter('page', OpenApiTypes.INT, description='Page number (default: 1)', required=False)
+_SORT_PARAM = OpenApiParameter(
+    'sort_by', OpenApiTypes.STR,
+    description='Sort order: popularity.desc | release_date.desc | rating.desc',
+    required=False,
+    enum=['popularity.desc', 'release_date.desc', 'rating.desc'],
+)
+
+_PAGINATED_RESPONSE = inline_serializer(
+    name='PaginatedMovieList',
+    fields={
+        'page': drf_serializers.IntegerField(),
+        'results': MovieSerializer(many=True),
+        'total_results': drf_serializers.IntegerField(),
+        'total_pages': drf_serializers.IntegerField(),
+    }
+)
+
+
+def _paginate(queryset, request):
+    """Helper: paginate a queryset and return (page, page_size, slice)."""
+    page = int(request.GET.get('page', 1))
+    page_size = 20
+    start = (page - 1) * page_size
+    total = queryset.count()
+    return page, total, queryset[start:start + page_size]
+
+
+# ─────────────────────────────────────────────
+# Discovery / List endpoints
+# ─────────────────────────────────────────────
+
 class DiscoverMoviesView(APIView):
     """General movie discovery endpoint"""
+<<<<<<< HEAD
 
     @extend_schema(
         tags=['Movies - Discovery'],
@@ -72,6 +138,29 @@ class DiscoverMoviesView(APIView):
         description='Browse all active movies. Supports sort and pagination.',
         parameters=[_PAGE_PARAM, _SORT_PARAM],
         responses={200: _PAGINATED_RESPONSE},
+=======
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+            OpenApiParameter(
+                name='sort_by',
+                description='Sort movies by: popularity.desc (default), release_date.desc, or rating.desc',
+                required=False,
+                type=OpenApiTypes.STR,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Discover movies',
+        description='Get a list of active movies with optional sorting and pagination.',
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
     )
     def get(self, request):
         sort_by = request.GET.get('sort_by', 'popularity.desc')
@@ -97,6 +186,7 @@ class DiscoverMoviesView(APIView):
 
 class PopularMoviesView(APIView):
     """Most viewed movies"""
+<<<<<<< HEAD
 
     @extend_schema(
         tags=['Movies - Discovery'],
@@ -104,6 +194,22 @@ class PopularMoviesView(APIView):
         description='Returns active movies ordered by view count (descending).',
         parameters=[_PAGE_PARAM],
         responses={200: _PAGINATED_RESPONSE},
+=======
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get popular movies',
+        description='Get a list of the most viewed movies.',
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
     )
     def get(self, request):
         movies = Movie.objects.filter(is_active=True).order_by('-views')
@@ -118,6 +224,7 @@ class PopularMoviesView(APIView):
 
 class NowPlayingMoviesView(APIView):
     """Recently added movies"""
+<<<<<<< HEAD
 
     @extend_schema(
         tags=['Movies - Discovery'],
@@ -125,6 +232,22 @@ class NowPlayingMoviesView(APIView):
         description='Returns the most recently added active movies.',
         parameters=[_PAGE_PARAM],
         responses={200: _PAGINATED_RESPONSE},
+=======
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get now playing movies',
+        description='Get a list of recently added movies.',
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
     )
     def get(self, request):
         movies = Movie.objects.filter(is_active=True).order_by('-created_at')
@@ -139,6 +262,7 @@ class NowPlayingMoviesView(APIView):
 
 class TopRatedMoviesView(APIView):
     """Highest rated movies"""
+<<<<<<< HEAD
 
     @extend_schema(
         tags=['Movies - Discovery'],
@@ -146,6 +270,22 @@ class TopRatedMoviesView(APIView):
         description='Returns movies with a rating of 4.0 or higher, ordered by rating.',
         parameters=[_PAGE_PARAM],
         responses={200: _PAGINATED_RESPONSE},
+=======
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get top rated movies',
+        description='Get a list of the highest rated movies (rating >= 4.0).',
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
     )
     def get(self, request):
         movies = Movie.objects.filter(is_active=True, rating__gte=4.0).order_by('-rating')
@@ -160,6 +300,7 @@ class TopRatedMoviesView(APIView):
 
 class UpcomingMoviesView(APIView):
     """Movies with future release dates"""
+<<<<<<< HEAD
 
     @extend_schema(
         tags=['Movies - Discovery'],
@@ -167,6 +308,22 @@ class UpcomingMoviesView(APIView):
         description='Returns active movies with a release date in the future.',
         parameters=[_PAGE_PARAM],
         responses={200: _PAGINATED_RESPONSE},
+=======
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                description='Page number for pagination (default: 1)',
+                required=False,
+                type=OpenApiTypes.INT,
+                location='query'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get upcoming movies',
+        description='Get a list of movies with future release dates, sorted by release date.',
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
     )
     def get(self, request):
         today = timezone.now().date()
@@ -185,6 +342,7 @@ class UpcomingMoviesView(APIView):
 # ─────────────────────────────────────────────
 
 class MovieDetailView(APIView):
+<<<<<<< HEAD
     """Detailed movie information"""
 
     @extend_schema(
@@ -195,6 +353,23 @@ class MovieDetailView(APIView):
             200: MovieDetailSerializer,
             404: OpenApiResponse(description='Movie not found'),
         },
+=======
+    """Detailed movie information - includes trailer"""
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='id',
+                description='Movie ID',
+                required=True,
+                type=OpenApiTypes.INT,
+                location='path'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get movie details',
+        description='Get detailed information about a specific movie including title, description, rating, cast, etc.',
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
     )
     def get(self, request, id):
         try:
@@ -209,6 +384,7 @@ class MovieDetailView(APIView):
 # ─────────────────────────────────────────────
 
 class MovieVideosView(APIView):
+<<<<<<< HEAD
     """Get video information for a movie"""
 
     @extend_schema(
@@ -225,6 +401,26 @@ class MovieVideosView(APIView):
             ),
             404: OpenApiResponse(description='Movie not found'),
         },
+=======
+    """
+    Get video information for a movie.
+    Returns trailer (always accessible) and full video info.
+    """
+    
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='id',
+                description='Movie ID',
+                required=True,
+                type=OpenApiTypes.INT,
+                location='path'
+            ),
+        ],
+        tags=['Movies'],
+        summary='Get movie videos',
+        description='Get video URLs and metadata for a movie (trailer and full movie if authenticated).',
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
     )
     def get(self, request, id):
         try:
@@ -352,6 +548,16 @@ class MovieImagesView(APIView):
             movie = Movie.objects.get(id=id, is_active=True)
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+<<<<<<< HEAD
+=======
+
+        return Response({
+            'id': movie.id,
+            'backdrops': [{'file_path': movie.backdrop_url, 'width': 1280, 'height': 720}] if movie.backdrop_url else [],
+            'posters': [{'file_path': movie.thumbnail_url, 'width': 300, 'height': 450}],
+        })
+
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
 
         return Response({
             'id': movie.id,
@@ -425,6 +631,7 @@ class MovieUpdateView(APIView):
     Requires admin auth.
     """
     parser_classes = [MultiPartParser, FormParser]
+<<<<<<< HEAD
     permission_classes = [IsAdminUser]
 
     @extend_schema(
@@ -507,6 +714,91 @@ class InitiateMultipartUploadView(APIView):
     permission_classes = [IsAdminUser]
 
     @extend_schema(
+=======
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(
+        tags=['Movies - Admin'],
+        summary='Update a movie (partial)',
+        description=(
+            'Partially update a movie. Send only the fields you want to change as **multipart/form-data**. '
+            'File fields replace the existing file when provided.'
+        ),
+        request={
+            'multipart/form-data': MovieCreateSerializer,
+        },
+        responses={
+            200: MovieDetailSerializer,
+            400: OpenApiResponse(description='Validation error'),
+            403: OpenApiResponse(description='Admin access required'),
+            404: OpenApiResponse(description='Movie not found'),
+        },
+    )
+    def patch(self, request, id):
+        try:
+            movie = Movie.objects.get(id=id)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = MovieCreateSerializer(movie, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            movie.refresh_from_db()
+            return Response(MovieDetailSerializer(movie).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class MovieDeleteView(APIView):
+    """
+    Delete a movie record.
+    Note: S3 media files are NOT deleted automatically.
+    Requires admin auth.
+    """
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(
+        tags=['Movies - Admin'],
+        summary='Delete a movie',
+        description=(
+            'Permanently deletes a movie record from the database. '
+            '**Note:** media files stored in S3 are not removed automatically.'
+        ),
+        responses={
+            204: OpenApiResponse(description='Deleted successfully'),
+            403: OpenApiResponse(description='Admin access required'),
+            404: OpenApiResponse(description='Movie not found'),
+        },
+    )
+    def delete(self, request, id):
+        try:
+            movie = Movie.objects.get(id=id)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        movie.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ─────────────────────────────────────────────
+# S3 Multipart Upload — Admin only
+# ─────────────────────────────────────────────
+
+def _s3_client():
+    return boto3.client(
+        's3',
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_S3_REGION_NAME,
+    )
+
+
+class InitiateMultipartUploadView(APIView):
+    """Initiate an S3 multipart upload session for large video files."""
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
         tags=['Movies - S3 Multipart Upload'],
         summary='Initiate multipart upload',
         description=(
@@ -574,6 +866,10 @@ class InitiateMultipartUploadView(APIView):
 
 class SignMultipartUploadPartView(APIView):
     """Generate a pre-signed URL for uploading a single part."""
+<<<<<<< HEAD
+=======
+    authentication_classes = [SessionAuthentication]
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
     permission_classes = [IsAdminUser]
 
     @extend_schema(
@@ -622,6 +918,10 @@ class SignMultipartUploadPartView(APIView):
 
 class CompleteMultipartUploadView(APIView):
     """Finalize a multipart upload after all parts have been uploaded."""
+<<<<<<< HEAD
+=======
+    authentication_classes = [SessionAuthentication]
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
     permission_classes = [IsAdminUser]
 
     @extend_schema(
@@ -675,6 +975,10 @@ class CompleteMultipartUploadView(APIView):
 
 class AbortMultipartUploadView(APIView):
     """Cancel an in-progress multipart upload and free S3 storage."""
+<<<<<<< HEAD
+=======
+    authentication_classes = [SessionAuthentication]
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
     permission_classes = [IsAdminUser]
 
     @extend_schema(

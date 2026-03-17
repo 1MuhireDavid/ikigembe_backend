@@ -8,12 +8,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
-
+from drf_spectacular.utils import extend_schema, OpenApiResponse
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
 from .serializers import (
     GoogleAuthSerializer,
     LoginSerializer,
     RegisterSerializer,
     UserSerializer,
+    RefreshSerializer
 )
 
 User = get_user_model()
@@ -40,6 +43,70 @@ class RegisterView(APIView):
     """
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        request=RegisterSerializer,
+        responses={
+            201: OpenApiResponse(
+                description='User successfully registered',
+                response={
+                    'type': 'object',
+                    'properties': {
+                        'access': {'type': 'string', 'description': 'JWT access token (expires in 30 minutes)'},
+                        'refresh': {'type': 'string', 'description': 'JWT refresh token (expires in 7 days)'},
+                        'user': {
+                            'type': 'object',
+                            'description': 'User profile information',
+                            'properties': {
+                                'id': {'type': 'integer'},
+                                'email': {'type': 'string'},
+                                'first_name': {'type': 'string'},
+                                'last_name': {'type': 'string'},
+                                'full_name': {'type': 'string'},
+                                'avatar_url': {'type': 'string', 'nullable': True},
+                                'is_staff': {'type': 'boolean'},
+                                'date_joined': {'type': 'string', 'format': 'date-time'},
+                            }
+                        }
+                    }
+                },
+            ),
+            400: OpenApiResponse(description='Invalid input (validation errors)'),
+        },
+        tags=['Authentication'],
+        summary='Register a new user account',
+        description='Create a new user with email and password. Passwords must be strong (8+ chars, mixed case, numbers, symbols).',
+        examples=[
+            OpenApiExample(
+                "Register Request",
+                value={
+                    "email": "user@example.com",
+                    "password": "SecurePass123!",
+                    "password_confirm": "SecurePass123!",
+                    "first_name": "John",
+                    "last_name": "Doe"
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                "Register Response",
+                value={
+                    "access": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                    "refresh": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                    "user": {
+                        "id": 1,
+                        "email": "user@example.com",
+                        "first_name": "John",
+                        "last_name": "Doe",
+                        "full_name": "John Doe",
+                        "avatar_url": None,
+                        "is_staff": False,
+                        "date_joined": "2024-03-14T10:30:00Z"
+                    }
+                },
+                response_only=True,
+            ),
+        ],
+    )
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -58,6 +125,29 @@ class LoginView(APIView):
     """
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        request=LoginSerializer,
+        responses={
+            200: OpenApiResponse(
+                description='User successfully authenticated',
+                response={
+                    'type': 'object',
+                    'properties': {
+                        'access': {'type': 'string', 'description': 'JWT access token (expires in 30 minutes)'},
+                        'refresh': {'type': 'string', 'description': 'JWT refresh token (expires in 7 days)'},
+                        'user': {
+                            'type': 'object',
+                            'description': 'User profile information',
+                        }
+                    }
+                },
+            ),
+            401: OpenApiResponse(description='Invalid email or password'),
+        },
+        tags=['Authentication'],
+        summary='Login with email and password',
+        description='Authenticate a user with their email and password credentials.',
+    )
     def post(self, request):
         serializer = LoginSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
@@ -83,6 +173,17 @@ class GoogleAuthView(APIView):
     """
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        request=GoogleAuthSerializer,
+        responses={
+            200: OpenApiResponse(description='User authenticated or created via Google'),
+            400: OpenApiResponse(description='Invalid or missing Google ID token'),
+            503: OpenApiResponse(description='Google Sign-In not configured on server'),
+        },
+        tags=['Authentication'],
+        summary='Authenticate with Google Sign-In',
+        description='Sign in or register using a Google ID token. If email exists, links Google ID to existing account.',
+    )
     def post(self, request):
         serializer = GoogleAuthSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -155,6 +256,16 @@ class TokenRefreshView(APIView):
     """
     permission_classes = [AllowAny]
 
+    @extend_schema(
+    request=RefreshSerializer,
+    responses={
+        200: OpenApiResponse(description="New access token generated"),
+        400: OpenApiResponse(description="Refresh token is required"),
+        401: OpenApiResponse(description="Invalid or expired refresh token"),
+    },
+    tags=["Authentication"],
+    summary="Refresh access token",
+    )
     def post(self, request):
         refresh_token = request.data.get('refresh')
         if not refresh_token:
@@ -181,14 +292,19 @@ class MeView(APIView):
     """Return the authenticated user's profile."""
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        responses={
+            200: UserSerializer(),
+            401: OpenApiResponse(description='Authentication credentials were not provided'),
+        },
+        tags=['User'],
+        summary='Get current user profile',
+        description='Retrieve the profile information of the authenticated user.',
+    )
     def get(self, request):
         serializer = UserSerializer(request.user)
         return Response(serializer.data)
 
-
-# ─────────────────────────────────────────────
-# Logout (blacklist refresh token)
-# ─────────────────────────────────────────────
 
 class LogoutView(APIView):
     """
@@ -197,6 +313,17 @@ class LogoutView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+
+    @extend_schema(
+        request=RefreshSerializer,
+        responses={
+            205: OpenApiResponse(description="Successfully logged out"),
+            400: OpenApiResponse(description="Refresh token is required"),
+            401: OpenApiResponse(description="Authentication credentials were not provided"),
+        },
+        tags=["Authentication"],
+        summary="Logout user",
+    )
     def post(self, request):
         refresh_token = request.data.get('refresh')
         if not refresh_token:

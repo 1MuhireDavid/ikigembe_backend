@@ -15,7 +15,9 @@ from datetime import timedelta
 from pathlib import Path
 from decouple import config
 import dj_database_url
+from dotenv import load_dotenv  # Add this import
 
+load_dotenv()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -30,7 +32,6 @@ SECRET_KEY = config('SECRET_KEY', default='django-insecure-k9886x5s5)m8#x8rz%mtj
 DEBUG = config('DEBUG', default=True, cast=bool)
 
 ALLOWED_HOSTS = ["*"]
-
 
 # Application definition
 
@@ -55,6 +56,7 @@ AUTH_USER_MODEL = 'users.User'
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -95,18 +97,40 @@ SPECTACULAR_SETTINGS = {
     'TITLE': 'Ikigembe API',
     'DESCRIPTION': 'API documentation for Ikigembe Backend',
     'VERSION': '1.0.0',
-    'SERVE_INCLUDE_SCHEMA': False,
-    'SECURITY': [{'BearerAuth': []}],
-    # 'COMPONENTS': {
-    #     'securitySchemes': {
-    #         'BearerAuth': {
-    #             'type': 'http',
-    #             'scheme': 'bearer',
-    #             'bearerFormat': 'JWT',
-    #         }
-    #     }
-    # },
-    # 'COMPONENT_SPLIT_REQUEST': True
+    'SERVE_INCLUDE_SCHEMA': True,
+
+    'SERVERS': [
+        {
+            'url': 'http://localhost:8000',
+            'description': 'Development server',
+        },
+        {
+            'url': 'https://ikigembe-backend.onrender.com',
+            'description': 'Production server',
+        },
+    ],
+
+    'SECURITY': [
+        {
+            'bearerAuth': [],
+        }
+    ],
+
+    'COMPONENTS': {
+        'securitySchemes': {
+            'bearerAuth': {
+                'type': 'http',
+                'scheme': 'bearer',
+                'bearerFormat': 'JWT',
+                'description': 'Enter your JWT access token',
+            }
+        }
+    },
+
+    'POSTPROCESSING_HOOKS': [
+        'drf_spectacular.hooks.postprocess_schema_enums',
+    ],
+    'DEFAULT_GENERATOR_CLASS': 'drf_spectacular.generators.SchemaGenerator',
 }
 
 
@@ -132,12 +156,12 @@ WSGI_APPLICATION = 'ikigembe_bn.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-
+DATABASE_URL = os.getenv('DATABASE_URL')
 DATABASES = {
-    "default": dj_database_url.config(
-        default=os.environ.get("DATABASE_URL"),
+    'default': dj_database_url.config(
+        default=DATABASE_URL,
         conn_max_age=600,
-        ssl_require=True
+        ssl_require='localhost' not in DATABASE_URL and '127.0.0.1' not in DATABASE_URL
     )
 }
 
@@ -173,10 +197,7 @@ USE_I18N = True
 USE_TZ = True
 
 
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/6.0/howto/static-files/
 
-STATIC_URL = 'static/'
 
 # Determine storage based on USE_S3 setting (not DEBUG)
 USE_S3 = True 
@@ -189,7 +210,6 @@ AWS_S3_REGION_NAME = os.getenv('AWS_S3_REGION_NAME')
 AWS_S3_FILE_OVERWRITE = False
 AWS_DEFAULT_ACL =  None
 AWS_S3_VERIFY = True
-# Use CloudFront domain if configured, otherwise fall back to direct S3
 AWS_CLOUDFRONT_DOMAIN = os.getenv('AWS_CLOUDFRONT_DOMAIN')
 AWS_S3_CUSTOM_DOMAIN = (
     AWS_CLOUDFRONT_DOMAIN
@@ -201,6 +221,8 @@ AWS_LOCATION = ''  # No prefix — files stored at root of bucket (e.g. movies/b
 AWS_S3_FILE_OVERWRITE = False
 AWS_QUERYSTRING_AUTH = False
 
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / "staticfiles"
 # FORCE S3 storage (this is the critical line)
 # DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
 
@@ -209,11 +231,11 @@ STORAGES = {
         "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
     },
     "staticfiles": {
-        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
 }
 
-MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/'  # CloudFront root — no /media/ prefix
+MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/'
 
 # Upload limits
 DATA_UPLOAD_MAX_MEMORY_SIZE = 5242880000  # 5GB
@@ -227,23 +249,17 @@ ALLOWED_IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp']
 THUMBNAIL_SIZE = (300, 450)
 BACKDROP_SIZE = (1280, 720)
 
-
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:4200",       # Angular dev server
-    "http://127.0.0.1:4200",
-    "https://ikigembe-backend.onrender.com",  # Production (update with your frontend domain)
-]
-
+CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
 CSRF_TRUSTED_ORIGINS = [
     "https://ikigembe-backend.onrender.com",
-    "http://localhost:4200",
+    "http://localhost:4200"
 ]
 
 
 # Security settings
-SECURE_CROSS_ORIGIN_OPENER_POLICY = None  # Allow video embedding
+SECURE_CROSS_ORIGIN_OPENER_POLICY = None
 X_FRAME_OPTIONS = 'SAMEORIGIN'
 
 # Default primary key field type

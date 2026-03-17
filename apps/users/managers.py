@@ -11,8 +11,12 @@ class UserManager(BaseUserManager):
             raise ValueError('Either an email address or a phone number is required.')
 
         if email:
+<<<<<<< HEAD
             # normalize_email() lowercases only the domain; .lower() covers the local part too
             email = self.normalize_email(email).lower()
+=======
+            email = self.normalize_email(email)
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
 
         if phone_number:
             extra_fields['phone_number'] = phone_number.strip()

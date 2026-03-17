@@ -4,7 +4,6 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-django = "*"
 psycopg2-binary = "*"
 djangorestframework = "*"
 boto3 = "*"
@@ -16,6 +15,10 @@ dj-database-url = "*"
 drf-spectacular = "*"
 djangorestframework-simplejwt = "*"
 google-auth = {extras = ["requests"], version = "*"}
+dotenv = "*"
+django = "*"
+python-dotenv = "*"
+whitenoise = "*"
 
 [dev-packages]
 

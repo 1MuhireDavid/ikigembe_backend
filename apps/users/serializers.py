@@ -5,12 +5,12 @@ from rest_framework import serializers
 User = get_user_model()
 
 
-# ─────────────────────────────────────────────
-# User representation (safe, read-only)
-# ─────────────────────────────────────────────
 
 class UserSerializer(serializers.ModelSerializer):
-    full_name = serializers.CharField(read_only=True)
+    full_name = serializers.CharField(
+        read_only=True,
+        help_text='User\'s full name (concatenation of first and last name).'
+    )
 
     class Meta:
         model = User
@@ -20,6 +20,15 @@ class UserSerializer(serializers.ModelSerializer):
             'avatar_url', 'is_staff', 'date_joined',
         ]
         read_only_fields = fields
+        extra_kwargs = {
+            'id': {'help_text': 'Unique user ID.'},
+            'email': {'help_text': 'User\'s email address.'},
+            'first_name': {'help_text': 'User\'s first name.'},
+            'last_name': {'help_text': 'User\'s last name.'},
+            'avatar_url': {'help_text': 'URL to user\'s profile picture (from Google or Gravatar).'},
+            'is_staff': {'help_text': 'Whether user has staff privileges.'},
+            'date_joined': {'help_text': 'Date and time when the account was created.'},
+        }
 
 
 # ─────────────────────────────────────────────
@@ -27,8 +36,23 @@ class UserSerializer(serializers.ModelSerializer):
 # ─────────────────────────────────────────────
 
 class RegisterSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
-    password_confirm = serializers.CharField(write_only=True, required=True)
+    password = serializers.CharField(
+        write_only=True,
+        required=True,
+        validators=[validate_password],
+        help_text='Password must be at least 8 characters and contain uppercase, lowercase, numbers, and special characters.',
+        style={'input_type': 'password'}
+    )
+    password_confirm = serializers.CharField(
+        write_only=True,
+        required=True,
+        help_text='Must match the password field above.',
+        style={'input_type': 'password'}
+    )
+
+    # Both are optional individually — validated together below
+    email = serializers.EmailField(required=False, allow_blank=True, default=None)
+    phone_number = serializers.CharField(required=False, allow_blank=True, max_length=20, default=None)
 
     # Both are optional individually — validated together below
     email = serializers.EmailField(required=False, allow_blank=True, default=None)
@@ -123,3 +147,10 @@ class GoogleAuthSerializer(serializers.Serializer):
         help_text='Google ID token obtained from the frontend Google Sign-In flow.'
     )
 
+<<<<<<< HEAD
+=======
+class RefreshSerializer(serializers.Serializer):
+    refresh = serializers.CharField(
+        help_text="The refresh token obtained during login or registration"
+    )
+>>>>>>> ef07f8817c67b9293428454c431a22c7e54d8ff8
