@@ -6,10 +6,12 @@ from .managers import UserManager
 
 class User(AbstractBaseUser, PermissionsMixin):
     """
-    Custom User model using email as the unique identifier.
-    Supports both email/password and Google OAuth2 authentication.
+    Custom User model.
+    Supports email/phone + password and Google OAuth2 authentication.
+    At least one of email or phone_number must be provided.
     """
-    email = models.EmailField(unique=True, db_index=True)
+    email = models.EmailField(unique=True, null=True, blank=True, db_index=True)
+    phone_number = models.CharField(max_length=20, unique=True, null=True, blank=True, db_index=True)
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)
 
@@ -32,7 +34,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         ordering = ['-date_joined']
 
     def __str__(self):
-        return self.email
+        return self.email or self.phone_number or f'User #{self.pk}'
 
     @property
     def full_name(self):
