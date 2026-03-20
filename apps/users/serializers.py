@@ -81,7 +81,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         allow_blank=True,
         max_length=150,
         default='',
-        help_text="User's last name (optional)."
+        help_text="User's last name (optional). "
     )
 
     class Meta:
@@ -133,9 +133,6 @@ class RegisterSerializer(serializers.ModelSerializer):
         return user
 
 
-# ─────────────────────────────────────────────
-# Login
-# ─────────────────────────────────────────────
 
 class LoginSerializer(serializers.Serializer):
     identifier = serializers.CharField(
