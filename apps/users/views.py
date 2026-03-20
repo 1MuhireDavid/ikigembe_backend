@@ -38,7 +38,7 @@ def _token_response(user):
 
 class RegisterView(APIView):
     """
-    Create a new user account with email and password.
+    Create a new user account using either an email address or a phone number (or both).
     Returns JWT access + refresh tokens on success.
     """
     permission_classes = [AllowAny]
@@ -58,7 +58,8 @@ class RegisterView(APIView):
                             'description': 'User profile information',
                             'properties': {
                                 'id': {'type': 'integer'},
-                                'email': {'type': 'string'},
+                                'email': {'type': 'string', 'nullable': True, 'description': 'Email address (null if registered with phone only)'},
+                                'phone_number': {'type': 'string', 'nullable': True, 'description': 'Phone number (null if registered with email only)'},
                                 'first_name': {'type': 'string'},
                                 'last_name': {'type': 'string'},
                                 'full_name': {'type': 'string'},
@@ -74,33 +75,68 @@ class RegisterView(APIView):
         },
         tags=['Authentication'],
         summary='Register a new user account',
-        description='Create a new user with email and password. Passwords must be strong (8+ chars, mixed case, numbers, symbols).',
+        description=(
+            'Create a new user account. You must supply **at least one** of `email` or `phone_number` '
+            '(you may provide both). Passwords must be strong: 8+ characters, mixed case, numbers, and symbols.\n\n'
+            '**Registration options:**\n'
+            '- Email only: provide `email`, omit or leave `phone_number` blank.\n'
+            '- Phone only: provide `phone_number`, omit or leave `email` blank.\n'
+            '- Both: provide both `email` and `phone_number`.'
+        ),
         examples=[
             OpenApiExample(
-                "Register Request",
+                'Register with Email Only',
+                summary='Register using an email address',
                 value={
-                    "email": "user@example.com",
-                    "password": "SecurePass123!",
-                    "password_confirm": "SecurePass123!",
-                    "first_name": "John",
-                    "last_name": "Doe"
+                    'email': 'user@example.com',
+                    'password': 'SecurePass123!',
+                    'password_confirm': 'SecurePass123!',
+                    'first_name': 'John',
+                    'last_name': 'Doe',
                 },
                 request_only=True,
             ),
             OpenApiExample(
-                "Register Response",
+                'Register with Phone Number Only',
+                summary='Register using a phone number',
                 value={
-                    "access": "eyJ0eXAiOiJKV1QiLCJhbGc...",
-                    "refresh": "eyJ0eXAiOiJKV1QiLCJhbGc...",
-                    "user": {
-                        "id": 1,
-                        "email": "user@example.com",
-                        "first_name": "John",
-                        "last_name": "Doe",
-                        "full_name": "John Doe",
-                        "avatar_url": None,
-                        "is_staff": False,
-                        "date_joined": "2024-03-14T10:30:00Z"
+                    'phone_number': '+250781234567',
+                    'password': 'SecurePass123!',
+                    'password_confirm': 'SecurePass123!',
+                    'first_name': 'Jane',
+                    'last_name': 'Doe',
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Register with Both Email and Phone',
+                summary='Register providing both email and phone number',
+                value={
+                    'email': 'user@example.com',
+                    'phone_number': '+250781234567',
+                    'password': 'SecurePass123!',
+                    'password_confirm': 'SecurePass123!',
+                    'first_name': 'John',
+                    'last_name': 'Doe',
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Register Response',
+                summary='Successful registration response',
+                value={
+                    'access': 'eyJ0eXAiOiJKV1QiLCJhbGc...',
+                    'refresh': 'eyJ0eXAiOiJKV1QiLCJhbGc...',
+                    'user': {
+                        'id': 1,
+                        'email': 'user@example.com',
+                        'phone_number': None,
+                        'first_name': 'John',
+                        'last_name': 'Doe',
+                        'full_name': 'John Doe',
+                        'avatar_url': None,
+                        'is_staff': False,
+                        'date_joined': '2024-03-14T10:30:00Z',
                     }
                 },
                 response_only=True,
@@ -120,7 +156,7 @@ class RegisterView(APIView):
 
 class LoginView(APIView):
     """
-    Authenticate with email and password.
+    Authenticate with email or phone number + password.
     Returns JWT access + refresh tokens on success.
     """
     permission_classes = [AllowAny]
@@ -142,11 +178,34 @@ class LoginView(APIView):
                     }
                 },
             ),
-            401: OpenApiResponse(description='Invalid email or password'),
+            400: OpenApiResponse(description='Invalid credentials'),
         },
         tags=['Authentication'],
-        summary='Login with email and password',
-        description='Authenticate a user with their email and password credentials.',
+        summary='Login with email or phone number',
+        description=(
+            'Authenticate a user using their **email address or phone number** together with their password.\n\n'
+            'Pass the email or phone number as the `identifier` field.'
+        ),
+        examples=[
+            OpenApiExample(
+                'Login with Email',
+                summary='Use email address as identifier',
+                value={
+                    'identifier': 'user@example.com',
+                    'password': 'SecurePass123!',
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Login with Phone Number',
+                summary='Use phone number as identifier',
+                value={
+                    'identifier': '+250781234567',
+                    'password': 'SecurePass123!',
+                },
+                request_only=True,
+            ),
+        ],
     )
     def post(self, request):
         serializer = LoginSerializer(data=request.data, context={'request': request})
