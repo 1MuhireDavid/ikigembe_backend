@@ -31,11 +31,13 @@ class UserSerializer(serializers.ModelSerializer):
         }
 
 
-# ─────────────────────────────────────────────
-# Registration
-# ─────────────────────────────────────────────
 
 class RegisterSerializer(serializers.ModelSerializer):
+    """
+    Serializer for user registration.
+    Either email or phone_number must be provided (or both).
+    """
+
     password = serializers.CharField(
         write_only=True,
         required=True,
@@ -50,13 +52,34 @@ class RegisterSerializer(serializers.ModelSerializer):
         style={'input_type': 'password'}
     )
 
-    # Both are optional individually — validated together below
-    email = serializers.EmailField(required=False, allow_blank=True, default=None)
-    phone_number = serializers.CharField(required=False, allow_blank=True, max_length=20, default=None)
 
-    # Both are optional individually — validated together below
-    email = serializers.EmailField(required=False, allow_blank=True, default=None)
-    phone_number = serializers.CharField(required=False, allow_blank=True, max_length=20, default=None)
+    email = serializers.EmailField(
+        required=False,
+        allow_blank=True,
+        default=None,
+        help_text='Email address. Required if phone_number is not provided.'
+    )
+    phone_number = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=20,
+        default=None,
+        help_text='Phone number (e.g. +250781234567). Required if email is not provided.'
+    )
+    first_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=150,
+        default='',
+        help_text="User's first name (optional)."
+    )
+    last_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=150,
+        default='',
+        help_text="User's last name (optional). "
+    )
 
     class Meta:
         model = User
@@ -84,7 +107,6 @@ class RegisterSerializer(serializers.ModelSerializer):
                 'At least one of email or phone number is required.'
             )
 
-        # Check uniqueness manually so we get friendly errors
         if email and User.objects.filter(email=email).exists():
             raise serializers.ValidationError({'email': 'A user with this email already exists.'})
 
@@ -108,9 +130,6 @@ class RegisterSerializer(serializers.ModelSerializer):
         return user
 
 
-# ─────────────────────────────────────────────
-# Login
-# ─────────────────────────────────────────────
 
 class LoginSerializer(serializers.Serializer):
     identifier = serializers.CharField(
@@ -122,7 +141,7 @@ class LoginSerializer(serializers.Serializer):
         identifier = attrs.get('identifier', '').strip()
         password = attrs.get('password')
 
-        # Try email first, then phone number
+        
         user = (
             User.objects.filter(email__iexact=identifier).first()
             or User.objects.filter(phone_number=identifier).first()
@@ -137,10 +156,6 @@ class LoginSerializer(serializers.Serializer):
         attrs['user'] = user
         return attrs
 
-
-# ─────────────────────────────────────────────
-# Google OAuth2
-# ─────────────────────────────────────────────
 
 class GoogleAuthSerializer(serializers.Serializer):
     id_token = serializers.CharField(
