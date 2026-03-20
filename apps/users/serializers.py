@@ -31,9 +31,6 @@ class UserSerializer(serializers.ModelSerializer):
         }
 
 
-# ─────────────────────────────────────────────
-# Registration
-# ─────────────────────────────────────────────
 
 class RegisterSerializer(serializers.ModelSerializer):
     """
@@ -159,10 +156,6 @@ class LoginSerializer(serializers.Serializer):
         attrs['user'] = user
         return attrs
 
-
-# ─────────────────────────────────────────────
-# Google OAuth2
-# ─────────────────────────────────────────────
 
 class GoogleAuthSerializer(serializers.Serializer):
     id_token = serializers.CharField(
