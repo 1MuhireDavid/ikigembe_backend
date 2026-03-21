@@ -17,7 +17,7 @@ class UserSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'phone_number',
             'first_name', 'last_name', 'full_name',
-            'avatar_url', 'is_staff', 'date_joined',
+            'avatar_url', 'is_staff', 'role', 'date_joined',
         ]
         read_only_fields = fields
         extra_kwargs = {
@@ -27,6 +27,7 @@ class UserSerializer(serializers.ModelSerializer):
             'last_name': {'help_text': 'User\'s last name.'},
             'avatar_url': {'help_text': 'URL to user\'s profile picture (from Google or Gravatar).'},
             'is_staff': {'help_text': 'Whether user has staff privileges.'},
+            'role': {'help_text': 'User role: Admin, Producer, or Viewer.'},
             'date_joined': {'help_text': 'Date and time when the account was created.'},
         }
 
@@ -125,6 +126,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             email=email,
             password=password,
             phone_number=phone_number,
+            # role intentionally omitted — all new registrations start as Viewer
             **validated_data,
         )
         return user
