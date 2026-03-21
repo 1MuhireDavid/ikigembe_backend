@@ -347,24 +347,23 @@ class TokenRefreshView(APIView):
             refresh = RefreshToken(refresh_token)
             access = refresh.access_token
 
-            # ── Re-stamp role & email so the new access token carries RBAC claims ──
-            user_id = refresh.payload.get(settings.SIMPLE_JWT.get('USER_ID_CLAIM', 'user_id'))
-            try:
-                user = User.objects.get(pk=user_id)
+            user_id = refresh.payload.get('user_id')
+
+            user = User.objects.filter(pk=user_id).only('id', 'role', 'email').first()
+            if user:
                 access['role'] = user.role
                 access['email'] = user.email or ''
-            except User.DoesNotExist:
-                pass  # token is structurally valid; claims will just be absent
 
             data = {'access': str(access)}
-            # Rotate the refresh token if configured
+
             if settings.SIMPLE_JWT.get('ROTATE_REFRESH_TOKENS'):
                 refresh.set_jti()
                 refresh.set_exp()
                 data['refresh'] = str(refresh)
-            return Response(data)
-        except TokenError as exc:
 
+            return Response(data)
+
+        except TokenError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
 
 
