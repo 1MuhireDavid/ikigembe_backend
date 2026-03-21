@@ -22,13 +22,25 @@ from .serializers import (
 User = get_user_model()
 
 
+# Role → front-end panel mapping
+_ROLE_REDIRECT = {
+    'Admin': '/admin-panel',
+    'Producer': '/producer-panel',
+    'Viewer': '/movie-gallery',
+}
+
+
 def _token_response(user):
     """Build a standard token + user payload for a given user."""
     refresh = RefreshToken.for_user(user)
+    # Embed role in the JWT payload to prevent front-end spoofing
+    refresh.access_token['role'] = user.role
+    refresh.access_token['email'] = user.email or ''
     return {
         'access': str(refresh.access_token),
         'refresh': str(refresh),
         'user': UserSerializer(user).data,
+        'redirect_to': _ROLE_REDIRECT.get(user.role, '/movie-gallery'),
     }
 
 
@@ -211,7 +223,8 @@ class LoginView(APIView):
         serializer = LoginSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data['user']
-        return Response(_token_response(user), status=status.HTTP_200_OK)
+        data = _token_response(user)
+        return Response(data, status=status.HTTP_200_OK)
 
 
 # ─────────────────────────────────────────────

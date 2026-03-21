@@ -2,8 +2,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.permissions import IsAdminUser
 from rest_framework.authentication import SessionAuthentication
+from apps.users.permissions import IsAdminRole
 from django.utils import timezone
 from django.conf import settings
 from drf_spectacular.utils import (
@@ -453,7 +453,7 @@ class MovieCreateView(APIView):
     Send as multipart/form-data. Requires admin auth.
     """
     parser_classes = [MultiPartParser, FormParser]
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
 
     @extend_schema(
         tags=['Movies - Admin'],
@@ -508,7 +508,7 @@ class MovieUpdateView(APIView):
     Requires admin auth.
     """
     parser_classes = [MultiPartParser, FormParser]
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
 
     @extend_schema(
         tags=['Movies - Admin'],
@@ -547,7 +547,7 @@ class MovieDeleteView(APIView):
     Note: S3 media files are NOT deleted automatically.
     Requires admin auth.
     """
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
 
     @extend_schema(
         tags=['Movies - Admin'],
@@ -588,7 +588,7 @@ def _s3_client():
 class InitiateMultipartUploadView(APIView):
     """Initiate an S3 multipart upload session for large video files."""
     authentication_classes = [SessionAuthentication]
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
 
     @extend_schema(
         tags=['Movies - S3 Multipart Upload'],
@@ -659,7 +659,7 @@ class InitiateMultipartUploadView(APIView):
 class SignMultipartUploadPartView(APIView):
     """Generate a pre-signed URL for uploading a single part."""
     authentication_classes = [SessionAuthentication]
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
 
     @extend_schema(
         tags=['Movies - S3 Multipart Upload'],
@@ -708,7 +708,7 @@ class SignMultipartUploadPartView(APIView):
 class CompleteMultipartUploadView(APIView):
     """Finalize a multipart upload after all parts have been uploaded."""
     authentication_classes = [SessionAuthentication]
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
 
     @extend_schema(
         tags=['Movies - S3 Multipart Upload'],
@@ -762,7 +762,7 @@ class CompleteMultipartUploadView(APIView):
 class AbortMultipartUploadView(APIView):
     """Cancel an in-progress multipart upload and free S3 storage."""
     authentication_classes = [SessionAuthentication]
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRole]
 
     @extend_schema(
         tags=['Movies - S3 Multipart Upload'],

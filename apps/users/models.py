@@ -10,6 +10,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     Supports email/phone + password and Google OAuth2 authentication.
     At least one of email or phone_number must be provided.
     """
+
+    class Role(models.TextChoices):
+        ADMIN = 'Admin', 'Admin'
+        PRODUCER = 'Producer', 'Producer'
+        VIEWER = 'Viewer', 'Viewer'
     email = models.EmailField(unique=True, null=True, blank=True, db_index=True)
     phone_number = models.CharField(max_length=20, unique=True, null=True, blank=True, db_index=True)
     first_name = models.CharField(max_length=150, blank=True)
@@ -18,6 +23,13 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Google OAuth2
     google_id = models.CharField(max_length=255, unique=True, null=True, blank=True, db_index=True)
     avatar_url = models.URLField(max_length=500, blank=True, null=True)
+
+    role = models.CharField(
+        max_length=20,
+        choices=Role.choices,
+        default=Role.VIEWER,
+        db_index=True,
+    )
 
     is_staff = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
