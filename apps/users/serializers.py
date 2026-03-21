@@ -82,16 +82,9 @@ class RegisterSerializer(serializers.ModelSerializer):
         help_text="User's last name (optional). "
     )
 
-    role = serializers.ChoiceField(
-        choices=['Admin', 'Producer', 'Viewer'],
-        default='Viewer',
-        required=False,
-        help_text='User role. Defaults to Viewer if not provided.',
-    )
-
     class Meta:
         model = User
-        fields = ['email', 'phone_number', 'password', 'password_confirm', 'first_name', 'last_name', 'role']
+        fields = ['email', 'phone_number', 'password', 'password_confirm', 'first_name', 'last_name']
 
     def validate_email(self, value):
         if value == '':
@@ -128,13 +121,12 @@ class RegisterSerializer(serializers.ModelSerializer):
         password = validated_data.pop('password')
         email = validated_data.pop('email', None) or None
         phone_number = validated_data.pop('phone_number', None) or None
-        role = validated_data.pop('role', 'Viewer')
 
         user = User.objects.create_user(
             email=email,
             password=password,
             phone_number=phone_number,
-            role=role,
+            # role intentionally omitted — all new registrations start as Viewer
             **validated_data,
         )
         return user

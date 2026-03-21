@@ -133,11 +133,11 @@ class LoginTests(APITestCase):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class RoleRegistrationTests(APITestCase):
-    """Tests for role field behaviour during registration."""
+    """Role is always Viewer on registration — it cannot be set via the public API."""
     url = '/api/auth/register/'
 
     def test_default_role_is_viewer(self):
-        """Registering without specifying a role should default to Viewer."""
+        """Registering without specifying a role defaults to Viewer."""
         response = self.client.post(self.url, {
             'email': 'viewer@example.com',
             'password': 'StrongPass1!',
@@ -146,37 +146,17 @@ class RoleRegistrationTests(APITestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data['user']['role'], 'Viewer')
 
-    def test_register_with_producer_role(self):
-        """Explicitly registering as Producer should persist the role."""
+    def test_role_field_is_ignored_at_registration(self):
+        """Even if a caller sends role=Admin it must be silently ignored and stored as Viewer."""
         response = self.client.post(self.url, {
-            'email': 'producer@example.com',
+            'email': 'tryadmin@example.com',
             'password': 'StrongPass1!',
             'password_confirm': 'StrongPass1!',
-            'role': 'Producer',
+            'role': 'Admin',          # must be stripped
         })
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data['user']['role'], 'Producer')
-
-    def test_register_with_admin_role(self):
-        """Explicitly registering as Admin should persist the role."""
-        response = self.client.post(self.url, {
-            'email': 'admin@example.com',
-            'password': 'StrongPass1!',
-            'password_confirm': 'StrongPass1!',
-            'role': 'Admin',
-        })
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data['user']['role'], 'Admin')
-
-    def test_invalid_role_is_rejected(self):
-        """An unrecognised role value should return 400."""
-        response = self.client.post(self.url, {
-            'email': 'badrole@example.com',
-            'password': 'StrongPass1!',
-            'password_confirm': 'StrongPass1!',
-            'role': 'SuperAdmin',
-        })
-        self.assertEqual(response.status_code, 400)
+        # The API should still succeed but the stored role must be Viewer
+        self.assertEqual(response.data['user']['role'], 'Viewer')
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -240,6 +220,17 @@ class RoleLoginTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         payload = self._decode_jwt_payload(response.data['access'])
         self.assertEqual(payload.get('email'), 'jwtmail@example.com')
+
+    def test_refreshed_token_contains_role_claim(self):
+        """Tokens minted via the refresh endpoint must also carry the role claim."""
+        login_resp = self._register_and_login('refreshrole@example.com', 'Viewer')
+        self.assertEqual(login_resp.status_code, 200)
+        refresh_token = login_resp.data['refresh']
+
+        refresh_resp = self.client.post('/api/auth/token/refresh/', {'refresh': refresh_token})
+        self.assertEqual(refresh_resp.status_code, 200)
+        payload = self._decode_jwt_payload(refresh_resp.data['access'])
+        self.assertEqual(payload.get('role'), 'Viewer')
 
 
 # ──────────────────────────────────────────────────────────────────────────────
