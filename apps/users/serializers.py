@@ -92,8 +92,8 @@ class RegisterSerializer(serializers.ModelSerializer):
         return value.lower().strip()
 
     def validate_phone_number(self, value):
-        if value == '':
-            return None
+        if value is None:
+            return value
         return value.strip()
 
     def validate(self, attrs):

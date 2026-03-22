@@ -1,5 +1,6 @@
 from django.db import models
 from django.core.validators import FileExtensionValidator
+from django.conf import settings
 
 
 class Movie(models.Model):
@@ -57,6 +58,15 @@ class Movie(models.Model):
         blank=True,
         null=True,
         help_text='Name of the movie producer'
+    )
+    producer_profile = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='uploaded_movies',
+        limit_choices_to={'role': 'Producer'},
+        help_text='Producer User Account'
     )
     
     # Video Metadata
