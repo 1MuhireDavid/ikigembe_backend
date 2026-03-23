@@ -3,7 +3,8 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema
-from django.db.models import Sum, Count, Q
+from django.db.models import Sum, Count, Q, OuterRef, Subquery
+from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 
@@ -27,7 +28,7 @@ class AdminDashboardOverviewView(AdminBaseView):
         total_views = Movie.objects.aggregate(total=Sum('views'))['total'] or 0
         
         total_revenue = Payment.objects.filter(status='Completed').aggregate(total=Sum('amount'))['total'] or 0
-        producer_revenue = int(total_revenue * 0.7)
+        producer_revenue = (total_revenue * 70) // 100
         ikigembe_commission = total_revenue - producer_revenue
         
         return Response({
@@ -108,27 +109,40 @@ class AdminUserDeleteView(AdminBaseView):
 class AdminProducersListView(AdminBaseView):
     @extend_schema(summary="List all producers with their stats (earnings, movies, withdrawals)")
     def get(self, request):
+        payments_sum = Payment.objects.filter(
+            movie__producer_profile=OuterRef('pk'),
+            status='Completed'
+        ).values('movie__producer_profile').annotate(
+            total=Sum('amount')
+        ).values('total')
+
+        withdrawn_sum = WithdrawalRequest.objects.filter(
+            producer=OuterRef('pk'),
+            status='Approved'
+        ).values('producer').annotate(
+            total=Sum('amount')
+        ).values('total')
+
+        pending_sum = WithdrawalRequest.objects.filter(
+            producer=OuterRef('pk'),
+            status='Pending'
+        ).values('producer').annotate(
+            total=Sum('amount')
+        ).values('total')
+
         producers = User.objects.filter(role='Producer').annotate(
             movies_uploaded_count=Count('uploaded_movies', distinct=True),
+            db_total_revenue=Coalesce(Subquery(payments_sum), 0),
+            db_total_withdrawn=Coalesce(Subquery(withdrawn_sum), 0),
+            db_pending_withdrawals=Coalesce(Subquery(pending_sum), 0),
         )
         data = []
         for p in producers:
-            total_revenue = Payment.objects.filter(
-                movie__producer_profile=p, 
-                status='Completed'
-            ).aggregate(total=Sum('amount'))['total'] or 0
+            total_revenue = getattr(p, 'db_total_revenue', 0)
+            earnings = (total_revenue * 70) // 100
             
-            earnings = int(total_revenue * 0.7)
-            
-            total_withdrawn = WithdrawalRequest.objects.filter(
-                producer=p,
-                status='Approved'
-            ).aggregate(total=Sum('amount'))['total'] or 0
-            
-            pending_withdrawals = WithdrawalRequest.objects.filter(
-                producer=p,
-                status='Pending'
-            ).aggregate(total=Sum('amount'))['total'] or 0
+            total_withdrawn = getattr(p, 'db_total_withdrawn', 0)
+            pending_withdrawals = getattr(p, 'db_pending_withdrawals', 0)
             
             data.append({
                 'id': p.id,

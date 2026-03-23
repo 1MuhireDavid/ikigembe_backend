@@ -145,6 +145,7 @@ class MovieCreateSerializer(serializers.ModelSerializer):
             'has_free_preview',
             'cast',
             'genres',
-            'producer'
+            'producer',
+            'producer_profile'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'views', 'rating']
