@@ -15,7 +15,8 @@ from datetime import timedelta
 from pathlib import Path
 from decouple import config
 import dj_database_url
-from dotenv import load_dotenv  # Add this import
+from dotenv import load_dotenv
+import sys
 
 load_dotenv()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -44,6 +45,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'apps.users',
     'apps.movies',
+    'apps.payments',
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
@@ -156,14 +158,26 @@ WSGI_APPLICATION = 'ikigembe_bn.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-DATABASE_URL = os.getenv('DATABASE_URL')
-DATABASES = {
-    'default': dj_database_url.config(
-        default=DATABASE_URL,
-        conn_max_age=600,
-        ssl_require='localhost' not in DATABASE_URL and '127.0.0.1' not in DATABASE_URL
-    )
-}
+if 'test' in sys.argv:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': ':memory:',
+        }
+    }
+else:
+    DATABASE_URL = os.getenv('DATABASE_URL')
+    DATABASES = {
+        'default': dj_database_url.config(
+            default=DATABASE_URL,
+            conn_max_age=600,
+            ssl_require=(
+                DATABASE_URL
+                and 'localhost' not in DATABASE_URL
+                and '127.0.0.1' not in DATABASE_URL
+            )
+        )
+    }
 
 
 # Password validation
