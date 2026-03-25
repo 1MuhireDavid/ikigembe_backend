@@ -8,6 +8,7 @@ from .admin_views import (
     AdminProducersListView,
     AdminProducerApproveView,
     AdminProducerSuspendView,
+    AdminCreateProducerView,
 )
 
 urlpatterns = [
@@ -25,4 +26,5 @@ urlpatterns = [
     path('producers/', AdminProducersListView.as_view(), name='admin-producers-list'),
     path('producers/<int:user_id>/approve/', AdminProducerApproveView.as_view(), name='admin-producer-approve'),
     path('producers/<int:user_id>/suspend/', AdminProducerSuspendView.as_view(), name='admin-producer-suspend'),
+    path('producers/create/', AdminCreateProducerView.as_view(), name='admin-producer-create'),
 ]

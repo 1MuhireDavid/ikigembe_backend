@@ -22,45 +22,12 @@ from .serializers import (
     MovieVideoAccessSerializer,
     MovieCreateSerializer,
 )
-from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
 import boto3
 import uuid
 import os
 
 # ─────────────────────────────────────────────
 # Shared helpers
-# ─────────────────────────────────────────────
-
-_PAGE_PARAM = OpenApiParameter('page', OpenApiTypes.INT, description='Page number (default: 1)', required=False)
-_SORT_PARAM = OpenApiParameter(
-    'sort_by', OpenApiTypes.STR,
-    description='Sort order: popularity.desc | release_date.desc | rating.desc',
-    required=False,
-    enum=['popularity.desc', 'release_date.desc', 'rating.desc'],
-)
-
-_PAGINATED_RESPONSE = inline_serializer(
-    name='PaginatedMovieList',
-    fields={
-        'page': drf_serializers.IntegerField(),
-        'results': MovieSerializer(many=True),
-        'total_results': drf_serializers.IntegerField(),
-        'total_pages': drf_serializers.IntegerField(),
-    }
-)
-
-
-def _paginate(queryset, request):
-    """Helper: paginate a queryset and return (page, page_size, slice)."""
-    page = int(request.GET.get('page', 1))
-    page_size = 20
-    start = (page - 1) * page_size
-    total = queryset.count()
-    return page, total, queryset[start:start + page_size]
-
-
-# ─────────────────────────────────────────────
-# Discovery / List endpoints
 # ─────────────────────────────────────────────
 
 _PAGE_PARAM = OpenApiParameter('page', OpenApiTypes.INT, description='Page number (default: 1)', required=False)
@@ -429,12 +396,6 @@ class MovieImagesView(APIView):
             movie = Movie.objects.get(id=id, is_active=True)
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        return Response({
-            'id': movie.id,
-            'backdrops': [{'file_path': movie.backdrop_url, 'width': 1280, 'height': 720}] if movie.backdrop_url else [],
-            'posters': [{'file_path': movie.thumbnail_url, 'width': 300, 'height': 450}],
-        })
 
         return Response({
             'id': movie.id,

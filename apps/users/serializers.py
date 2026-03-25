@@ -168,3 +168,84 @@ class RefreshSerializer(serializers.Serializer):
     refresh = serializers.CharField(
         help_text="The refresh token obtained during login or registration"
     )
+
+class AdminCreateProducerSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(
+        write_only=True,
+        required=True,
+        validators=[validate_password],
+        help_text='Password must be at least 8 characters and contain uppercase, lowercase, numbers, and special characters.',
+        style={'input_type': 'password'}
+    )
+    email = serializers.EmailField(
+        required=False,
+        allow_blank=True,
+        default=None,
+        help_text='Email address. Required if phone_number is not provided.'
+    )
+    phone_number = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=20,
+        default=None,
+        help_text='Phone number (e.g. +250781234567). Required if email is not provided.'
+    )
+    first_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=150,
+        default='',
+        help_text="User's first name."
+    )
+    last_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=150,
+        default='',
+        help_text="User's last name."
+    )
+
+    class Meta:
+        model = User
+        fields = ['email', 'phone_number', 'password', 'first_name', 'last_name']
+
+    def validate_email(self, value):
+        if value == '':
+            return None
+        return value.lower().strip()
+
+    def validate_phone_number(self, value):
+        if value is None:
+            return value
+        return value.strip()
+
+    def validate(self, attrs):
+        email = attrs.get('email')
+        phone_number = attrs.get('phone_number')
+
+        if not email and not phone_number:
+            raise serializers.ValidationError(
+                'At least one of email or phone number is required.'
+            )
+
+        if email and User.objects.filter(email=email).exists():
+            raise serializers.ValidationError({'email': 'A user with this email already exists.'})
+
+        if phone_number and User.objects.filter(phone_number=phone_number).exists():
+            raise serializers.ValidationError({'phone_number': 'A user with this phone number already exists.'})
+
+        return attrs
+
+    def create(self, validated_data):
+        password = validated_data.pop('password')
+        email = validated_data.pop('email', None) or None
+        phone_number = validated_data.pop('phone_number', None) or None
+
+        user = User.objects.create_user(
+            email=email,
+            password=password,
+            phone_number=phone_number,
+            role=User.Role.PRODUCER,
+            **validated_data
+        )
+        return user
