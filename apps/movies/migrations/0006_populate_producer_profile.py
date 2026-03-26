@@ -27,7 +27,7 @@ def populate_producer_profile(apps, schema_editor):
                     role='Producer',
                     is_active=False,
                 )
-                producer_user.set_unusable_password()
+                producer_user.password = "!"
                 producer_user.save()
 
             movie.producer_profile = producer_user
