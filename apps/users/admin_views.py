@@ -27,9 +27,20 @@ class AdminDashboardOverviewView(AdminBaseView):
         total_movies = Movie.objects.count()
         total_views = Movie.objects.aggregate(total=Sum('views'))['total'] or 0
         
+        from django.utils import timezone
+        now = timezone.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        month_start = today_start.replace(day=1)
+        
         total_revenue = Payment.objects.filter(status='Completed').aggregate(total=Sum('amount'))['total'] or 0
         producer_revenue = (total_revenue * 70) // 100
         ikigembe_commission = total_revenue - producer_revenue
+        
+        revenue_today = Payment.objects.filter(status='Completed', created_at__gte=today_start).aggregate(total=Sum('amount'))['total'] or 0
+        revenue_this_month = Payment.objects.filter(status='Completed', created_at__gte=month_start).aggregate(total=Sum('amount'))['total'] or 0
+        
+        total_paid_to_producers = WithdrawalRequest.objects.filter(status='Approved').aggregate(total=Sum('amount'))['total'] or 0
+        total_profit = total_revenue - total_paid_to_producers
         
         return Response({
             'total_viewers': total_viewers,
@@ -39,8 +50,51 @@ class AdminDashboardOverviewView(AdminBaseView):
             'financials': {
                 'total_revenue': total_revenue,
                 'producer_revenue': producer_revenue,
-                'ikigembe_commission': ikigembe_commission
+                'ikigembe_commission': ikigembe_commission,
+                'revenue_today': revenue_today,
+                'revenue_this_month': revenue_this_month,
+                'total_paid_to_producers': total_paid_to_producers,
+                'total_profit': total_profit
             }
+        })
+
+class AdminTransactionHistoryView(AdminBaseView):
+    @extend_schema(summary="Get all platform transactions (payments, withdrawals, pending withdrawals)")
+    def get(self, request):
+        payments = Payment.objects.all().select_related('user', 'movie').order_by('-created_at')
+        withdrawals = WithdrawalRequest.objects.exclude(status='Pending').select_related('producer').order_by('-created_at')
+        pending_withdrawals = WithdrawalRequest.objects.filter(status='Pending').select_related('producer').order_by('-created_at')
+        
+        payments_data = [{
+            'id': p.id,
+            'user': p.user.full_name,
+            'movie_title': p.movie.title if p.movie else 'Unknown',
+            'amount': p.amount,
+            'status': p.status,
+            'created_at': p.created_at
+        } for p in payments]
+        
+        withdrawals_data = [{
+            'id': w.id,
+            'producer': w.producer.full_name,
+            'amount': w.amount,
+            'status': w.status,
+            'created_at': w.created_at,
+            'processed_at': w.processed_at
+        } for w in withdrawals]
+        
+        pending_data = [{
+            'id': w.id,
+            'producer': w.producer.full_name,
+            'amount': w.amount,
+            'status': w.status,
+            'created_at': w.created_at
+        } for w in pending_withdrawals]
+        
+        return Response({
+            'payments': payments_data,
+            'withdrawals': withdrawals_data,
+            'pending_withdrawals': pending_data
         })
 
 
