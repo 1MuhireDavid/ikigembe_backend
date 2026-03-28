@@ -11,7 +11,7 @@ from drf_spectacular.utils import (
     OpenApiResponse,
 )
 from drf_spectacular.types import OpenApiTypes
-from django.db.models import Sum, Count, Q, OuterRef, Subquery
+from django.db.models import Sum, Count, Q
 from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
@@ -25,6 +25,14 @@ from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_prod
 User = get_user_model()
 
 _TAG = 'Admin Dashboard'
+
+
+def _safe_page(request):
+    """Return a valid page number from ?page=, defaulting to 1 for any invalid input."""
+    try:
+        return max(1, int(request.GET.get('page', 1)))
+    except (TypeError, ValueError):
+        return 1
 
 
 class AdminBaseView(APIView):
@@ -341,22 +349,59 @@ class AdminProducersListView(AdminBaseView):
         },
     )
     def get(self, request):
-        producers = User.objects.filter(role='Producer').annotate(
+        producers = list(User.objects.filter(role='Producer').annotate(
             movies_uploaded_count=Count('uploaded_movies', distinct=True),
-        )
+        ))
+        producer_ids = [p.id for p in producers]
+
+        # Batch all financial aggregations in 3 queries (instead of 3–4 per producer).
+        revenue_map = {
+            row['movie__producer_profile_id']: row['total']
+            for row in Payment.objects.filter(
+                movie__producer_profile_id__in=producer_ids,
+                status='Completed',
+            ).values('movie__producer_profile_id').annotate(total=Sum('amount'))
+        }
+
+        locked_map = {
+            row['producer_id']: row['total']
+            for row in WithdrawalRequest.objects.filter(
+                producer_id__in=producer_ids,
+                status__in=['Pending', 'Approved', 'Completed'],
+            ).values('producer_id').annotate(total=Sum('amount'))
+        }
+
+        pending_map = {
+            row['producer_id']: row['total']
+            for row in WithdrawalRequest.objects.filter(
+                producer_id__in=producer_ids,
+                status='Pending',
+            ).values('producer_id').annotate(total=Sum('amount'))
+        }
+
+        withdrawn_map = {
+            row['producer_id']: row['total']
+            for row in WithdrawalRequest.objects.filter(
+                producer_id__in=producer_ids,
+                status='Completed',
+            ).values('producer_id').annotate(total=Sum('amount'))
+        }
+
         data = []
         for p in producers:
-            wallet = get_producer_wallet(p)
+            raw_revenue = revenue_map.get(p.id) or 0
+            total_earnings = (raw_revenue * 70) // 100
+            locked = locked_map.get(p.id) or 0
             data.append({
                 'id': p.id,
                 'name': p.full_name,
                 'email': p.email,
                 'phone_number': p.phone_number,
                 'movies_uploaded': p.movies_uploaded_count,
-                'total_earnings': wallet['total_earnings'],
-                'balance': wallet['wallet_balance'],
-                'pending_withdrawals': wallet['pending_withdrawals'],
-                'total_withdrawn': wallet['total_withdrawn'],
+                'total_earnings': total_earnings,
+                'balance': total_earnings - locked,
+                'pending_withdrawals': pending_map.get(p.id) or 0,
+                'total_withdrawn': withdrawn_map.get(p.id) or 0,
                 'is_active': p.is_active,
                 'date_joined': p.date_joined,
             })
@@ -534,7 +579,7 @@ class AdminWithdrawalsListView(AdminBaseView):
         if status_filter:
             qs = qs.filter(status=status_filter)
 
-        page = int(request.GET.get('page', 1))
+        page = _safe_page(request)
         page_size = 20
         start = (page - 1) * page_size
         total = qs.count()
@@ -630,7 +675,8 @@ class AdminWithdrawalCompleteView(AdminBaseView):
             )
 
         withdrawal.status = 'Completed'
-        withdrawal.save(update_fields=['status'])
+        withdrawal.processed_at = timezone.now()
+        withdrawal.save(update_fields=['status', 'processed_at'])
 
         return Response({
             'message': 'Withdrawal marked as completed.',

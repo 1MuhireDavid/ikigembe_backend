@@ -338,17 +338,20 @@ class MovieVideosView(APIView):
 
 
 class MovieStreamView(APIView):
-    """Get full-movie streaming URL"""
+    """Get full-movie streaming URL — requires authentication and a completed payment."""
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(
         tags=['Movies - Media'],
         summary='Stream full movie',
         description=(
-            'Returns the full-movie streaming URL and increments the view counter. '
-            '**Development mode** — payment check is disabled.'
+            'Returns the streaming URL (HLS or MP4 fallback) for a purchased movie '
+            'and increments its view counter. '
+            'Requires a completed payment for the movie.'
         ),
         responses={
             200: MovieVideoAccessSerializer,
+            403: OpenApiResponse(description='Movie not purchased'),
             404: OpenApiResponse(description='Movie not found'),
         },
     )
@@ -357,6 +360,16 @@ class MovieStreamView(APIView):
             movie = Movie.objects.get(id=id, is_active=True)
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Payment gate: verify the user has purchased this movie.
+        has_access = Payment.objects.filter(
+            user=request.user, movie=movie, status='Completed'
+        ).exists()
+        if not has_access:
+            return Response(
+                {'error': 'Purchase required to stream this movie.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         movie.increment_views()
         serializer = MovieVideoAccessSerializer(movie, context={'request': request})
@@ -367,7 +380,6 @@ class MovieStreamView(APIView):
                 'stream_type': 'hls',
                 'hls_status': movie.hls_status,
                 'fallback_url': movie.video_url,
-                'message': 'Development mode - payment not required',
             })
         return Response({
             'movie': serializer.data,
@@ -375,7 +387,6 @@ class MovieStreamView(APIView):
             'stream_type': 'mp4',
             'hls_status': movie.hls_status,
             'fallback_url': None,
-            'message': 'Development mode - payment not required',
         })
 
 
@@ -1007,10 +1018,18 @@ class WatchProgressView(APIView):
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        progress_seconds = request.data.get('progress_seconds', 0)
-        duration_seconds = request.data.get('duration_seconds', 0)
+        # Run all input validation through the serializer to prevent type errors
+        # from raw string values reaching numeric comparisons.
+        # Inject the movie id so the serializer's cross-field validator can run.
+        input_serializer = WatchProgressSerializer(
+            data={**request.data, 'movie': id}
+        )
+        input_serializer.is_valid(raise_exception=True)
+        progress_seconds = input_serializer.validated_data.get('progress_seconds', 0)
+        duration_seconds = input_serializer.validated_data.get('duration_seconds', 0)
 
         # Mark as completed when the viewer reaches ≥ 90% of the total duration.
+        # Server-side computation — the client cannot force completion.
         completed = (
             duration_seconds > 0
             and progress_seconds >= duration_seconds * 0.9

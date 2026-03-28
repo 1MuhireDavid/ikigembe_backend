@@ -1,3 +1,6 @@
+from django.db import transaction
+from django.db.models import Sum
+from django.db.models.functions import Coalesce
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -8,8 +11,16 @@ from drf_spectacular.types import OpenApiTypes
 from apps.users.permissions import IsProducerRole
 from apps.movies.models import Movie
 from apps.movies.serializers import ProducerMovieListSerializer
-from apps.payments.models import WithdrawalRequest
+from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import WithdrawalRequestSerializer, get_producer_wallet
+
+
+def _safe_page(request):
+    """Return a valid page number from ?page=, defaulting to 1 for any invalid input."""
+    try:
+        return max(1, int(request.GET.get('page', 1)))
+    except (TypeError, ValueError):
+        return 1
 
 _TAG = 'Producer Dashboard'
 
@@ -55,7 +66,7 @@ class ProducerMyMoviesView(ProducerBaseView):
             producer_profile=request.user
         ).order_by('-created_at')
 
-        page = int(request.GET.get('page', 1))
+        page = _safe_page(request)
         page_size = 20
         start = (page - 1) * page_size
         total = movies.count()
@@ -125,7 +136,7 @@ class ProducerWithdrawalsView(ProducerBaseView):
     )
     def get(self, request):
         qs = WithdrawalRequest.objects.filter(producer=request.user)
-        page = int(request.GET.get('page', 1))
+        page = _safe_page(request)
         page_size = 20
         start = (page - 1) * page_size
         total = qs.count()
@@ -157,13 +168,30 @@ class ProducerWithdrawalsView(ProducerBaseView):
         serializer.is_valid(raise_exception=True)
 
         amount = serializer.validated_data['amount']
-        wallet = get_producer_wallet(request.user)
 
-        if amount > wallet['wallet_balance']:
-            return Response(
-                {'error': f"Amount exceeds available balance of {wallet['wallet_balance']} RWF."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Hold a row-level lock on all non-rejected withdrawal rows for this
+        # producer before computing the available balance.  Without this lock,
+        # two concurrent requests can both read the same balance, both pass the
+        # check, and together overspend (TOCTOU race).
+        with transaction.atomic():
+            locked = WithdrawalRequest.objects.select_for_update().filter(
+                producer=request.user,
+                status__in=['Pending', 'Approved', 'Completed'],
+            ).aggregate(total=Coalesce(Sum('amount'), 0))['total']
 
-        serializer.save(producer=request.user, status='Pending')
+            raw_revenue = Payment.objects.filter(
+                movie__producer_profile=request.user,
+                status='Completed',
+            ).aggregate(total=Coalesce(Sum('amount'), 0))['total']
+
+            balance = (raw_revenue * 70) // 100 - locked
+
+            if amount > balance:
+                return Response(
+                    {'error': f"Amount exceeds available balance of {balance} RWF."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            serializer.save(producer=request.user, status='Pending')
+
         return Response(serializer.data, status=status.HTTP_201_CREATED)
