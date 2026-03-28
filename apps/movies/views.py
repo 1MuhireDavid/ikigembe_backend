@@ -15,12 +15,16 @@ from drf_spectacular.utils import (
 )
 from drf_spectacular.types import OpenApiTypes
 from rest_framework import serializers as drf_serializers
-from .models import Movie
+from rest_framework.permissions import IsAuthenticated
+from apps.payments.models import Payment
+from .models import Movie, WatchProgress
 from .serializers import (
     MovieSerializer,
     MovieDetailSerializer,
     MovieVideoAccessSerializer,
     MovieCreateSerializer,
+    MyListMovieSerializer,
+    WatchProgressSerializer,
 )
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
 import boto3
@@ -865,3 +869,161 @@ class AbortMultipartUploadView(APIView):
             return Response({'status': 'aborted'})
         except Exception as e:
             return Response({'error': str(e)}, status=500)
+
+
+# ─────────────────────────────────────────────
+# My List  (purchased movies + continue-watching)
+# ─────────────────────────────────────────────
+
+class MyListView(APIView):
+    """
+    Returns all movies the authenticated user has purchased.
+    Each movie card includes watch-progress fields so the frontend can render
+    the "Continue Watching" progress bar inline.
+
+    GET /api/movies/my-list/
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=['Movies - Viewer'],
+        summary='My List — purchased movies with watch progress',
+        description=(
+            'Returns every movie the user has paid for, enriched with their '
+            'current playback position.  Use `completed=false` entries to '
+            'build a "Continue Watching" row.'
+        ),
+        responses={200: MyListMovieSerializer(many=True)},
+    )
+    def get(self, request):
+        # Fetch movie IDs the user has paid for.
+        paid_movie_ids = Payment.objects.filter(
+            user=request.user, status='Completed'
+        ).values_list('movie_id', flat=True)
+
+        movies = Movie.objects.filter(id__in=paid_movie_ids, is_active=True)
+
+        # Fetch all progress records for this user in one query.
+        progress_map = {
+            wp.movie_id: wp
+            for wp in WatchProgress.objects.filter(
+                user=request.user, movie_id__in=paid_movie_ids
+            )
+        }
+
+        # Annotate each movie with its progress object so the serializer can
+        # access it without triggering additional queries.
+        for movie in movies:
+            movie.watch_progress_obj = progress_map.get(movie.id)
+
+        serializer = MyListMovieSerializer(movies, many=True)
+        return Response(serializer.data)
+
+
+class ContinueWatchingView(APIView):
+    """
+    Returns movies the user has started watching but not yet completed,
+    ordered by most recently watched.
+
+    GET /api/movies/continue-watching/
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=['Movies - Viewer'],
+        summary='Continue Watching — in-progress movies',
+        description='Returns movies where the user has saved progress but has not yet finished watching.',
+        responses={200: MyListMovieSerializer(many=True)},
+    )
+    def get(self, request):
+        progress_qs = WatchProgress.objects.filter(
+            user=request.user,
+            completed=False,
+            progress_seconds__gt=0,
+        ).select_related('movie').order_by('-last_watched_at')
+
+        movies = []
+        for wp in progress_qs:
+            if wp.movie and wp.movie.is_active:
+                wp.movie.watch_progress_obj = wp
+                movies.append(wp.movie)
+
+        serializer = MyListMovieSerializer(movies, many=True)
+        return Response(serializer.data)
+
+
+# ─────────────────────────────────────────────
+# Watch Progress
+# ─────────────────────────────────────────────
+
+class WatchProgressView(APIView):
+    """
+    GET  /api/movies/<id>/progress/ — retrieve the user's saved position.
+    POST /api/movies/<id>/progress/ — save (upsert) the playback position.
+
+    The frontend should call POST periodically during playback (e.g. every 15 s)
+    and on pause/close so the server always has an up-to-date resume point.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=['Movies - Viewer'],
+        summary='Get watch progress for a movie',
+        responses={
+            200: WatchProgressSerializer(),
+            404: OpenApiResponse(description='No progress saved yet'),
+        },
+    )
+    def get(self, request, id):
+        try:
+            wp = WatchProgress.objects.get(user=request.user, movie_id=id)
+        except WatchProgress.DoesNotExist:
+            return Response({'progress_seconds': 0, 'duration_seconds': 0, 'completed': False})
+        serializer = WatchProgressSerializer(wp)
+        return Response(serializer.data)
+
+    @extend_schema(
+        tags=['Movies - Viewer'],
+        summary='Save watch progress for a movie',
+        request=WatchProgressSerializer,
+        responses={
+            200: WatchProgressSerializer(),
+            403: OpenApiResponse(description='User has not purchased this movie'),
+        },
+    )
+    def post(self, request, id):
+        # Only users who have purchased the movie can save progress.
+        has_access = Payment.objects.filter(
+            user=request.user, movie_id=id, status='Completed'
+        ).exists()
+        if not has_access:
+            return Response(
+                {'error': 'You have not purchased this movie.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        try:
+            movie = Movie.objects.get(pk=id)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        progress_seconds = request.data.get('progress_seconds', 0)
+        duration_seconds = request.data.get('duration_seconds', 0)
+
+        # Mark as completed when the viewer reaches ≥ 90% of the total duration.
+        completed = (
+            duration_seconds > 0
+            and progress_seconds >= duration_seconds * 0.9
+        )
+
+        wp, _ = WatchProgress.objects.update_or_create(
+            user=request.user,
+            movie=movie,
+            defaults={
+                'progress_seconds': progress_seconds,
+                'duration_seconds': duration_seconds,
+                'completed': completed,
+            },
+        )
+        serializer = WatchProgressSerializer(wp)
+        return Response(serializer.data)

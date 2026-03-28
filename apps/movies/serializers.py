@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import Movie
+from apps.payments.models import Payment
+from .models import Movie, WatchProgress
 
 
 class MovieSerializer(serializers.ModelSerializer):
@@ -157,12 +158,15 @@ class MovieVideoAccessSerializer(serializers.ModelSerializer):
         return obj.trailer_file.url if obj.trailer_file else None
 
     def get_access_granted(self, obj):
-        """
-        Check if user has paid for this movie.
-        For now, returns True for development.
-        """
-        # TODO: Implement payment verification
-        return True
+        """Return True if the requesting user has a completed payment for this movie."""
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            return False
+        return Payment.objects.filter(
+            user=request.user,
+            movie=obj,
+            status='Completed',
+        ).exists()
 
 
 class MovieCreateSerializer(serializers.ModelSerializer):
@@ -191,3 +195,64 @@ class MovieCreateSerializer(serializers.ModelSerializer):
             'producer_profile'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'views', 'rating']
+
+
+class WatchProgressSerializer(serializers.ModelSerializer):
+    """Read/write serializer for a user's playback position on a movie."""
+
+    class Meta:
+        model = WatchProgress
+        fields = ['movie', 'progress_seconds', 'duration_seconds', 'completed', 'last_watched_at']
+        read_only_fields = ['last_watched_at']
+
+    def validate(self, attrs):
+        duration = attrs.get('duration_seconds', 0)
+        progress = attrs.get('progress_seconds', 0)
+        if duration and progress > duration:
+            raise serializers.ValidationError(
+                {'progress_seconds': 'progress_seconds cannot exceed duration_seconds.'}
+            )
+        return attrs
+
+
+class MyListMovieSerializer(serializers.ModelSerializer):
+    """
+    Movie card shown in "My List" and "Continue Watching".
+    Includes watch-progress fields when a WatchProgress object is annotated
+    onto the instance as ``watch_progress_obj``.
+    """
+    thumbnail_url = serializers.SerializerMethodField()
+    progress_seconds = serializers.SerializerMethodField()
+    duration_seconds = serializers.SerializerMethodField()
+    completed = serializers.SerializerMethodField()
+    last_watched_at = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Movie
+        fields = [
+            'id', 'title', 'overview', 'thumbnail_url',
+            'duration_minutes', 'genres', 'rating', 'price',
+            'progress_seconds', 'duration_seconds', 'completed', 'last_watched_at',
+        ]
+
+    def get_thumbnail_url(self, obj):
+        return obj.thumbnail.url if obj.thumbnail else None
+
+    def _progress(self, obj):
+        return getattr(obj, 'watch_progress_obj', None)
+
+    def get_progress_seconds(self, obj):
+        p = self._progress(obj)
+        return p.progress_seconds if p else 0
+
+    def get_duration_seconds(self, obj):
+        p = self._progress(obj)
+        return p.duration_seconds if p else 0
+
+    def get_completed(self, obj):
+        p = self._progress(obj)
+        return p.completed if p else False
+
+    def get_last_watched_at(self, obj):
+        p = self._progress(obj)
+        return p.last_watched_at if p else None
