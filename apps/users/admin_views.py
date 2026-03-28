@@ -68,37 +68,20 @@ class AdminTransactionHistoryView(AdminBaseView):
         payments = Payment.objects.all().select_related('user', 'movie').order_by('-created_at')
         withdrawals = WithdrawalRequest.objects.exclude(status='Pending').select_related('producer').order_by('-created_at')
         pending_withdrawals = WithdrawalRequest.objects.filter(status='Pending').select_related('producer').order_by('-created_at')
-        
+
         payments_data = [{
             'id': p.id,
             'user': p.user.full_name,
             'movie_title': p.movie.title if p.movie else 'Unknown',
             'amount': p.amount,
             'status': p.status,
-            'created_at': p.created_at
+            'created_at': p.created_at,
         } for p in payments]
-        
-        withdrawals_data = [{
-            'id': w.id,
-            'producer': w.producer.full_name,
-            'amount': w.amount,
-            'status': w.status,
-            'created_at': w.created_at,
-            'processed_at': w.processed_at
-        } for w in withdrawals]
-        
-        pending_data = [{
-            'id': w.id,
-            'producer': w.producer.full_name,
-            'amount': w.amount,
-            'status': w.status,
-            'created_at': w.created_at
-        } for w in pending_withdrawals]
-        
+
         return Response({
             'payments': payments_data,
-            'withdrawals': withdrawals_data,
-            'pending_withdrawals': pending_data
+            'withdrawals': AdminWithdrawalRequestSerializer(withdrawals, many=True).data,
+            'pending_withdrawals': AdminWithdrawalRequestSerializer(pending_withdrawals, many=True).data,
         })
 
 
