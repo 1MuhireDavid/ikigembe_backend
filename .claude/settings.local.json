@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs ls:*)",
+      "Bash(python manage.py test apps.users --verbosity=2)",
+      "Bash(ls C:UsersAmalitechikigembe_backend/apps/users/tests*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}
