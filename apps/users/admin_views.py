@@ -9,10 +9,12 @@ from django.db.models import Sum, Count, Q, OuterRef, Subquery
 from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 
 from apps.users.permissions import IsAdminRole
 from apps.movies.models import Movie
 from apps.payments.models import Payment, WithdrawalRequest
+from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet
 
 User = get_user_model()
 
@@ -41,7 +43,7 @@ class AdminDashboardOverviewView(AdminBaseView):
         revenue_today = Payment.objects.filter(status='Completed', created_at__gte=today_start).aggregate(total=Sum('amount'))['total'] or 0
         revenue_this_month = Payment.objects.filter(status='Completed', created_at__gte=month_start).aggregate(total=Sum('amount'))['total'] or 0
         
-        total_paid_to_producers = WithdrawalRequest.objects.filter(status='Approved').aggregate(total=Sum('amount'))['total'] or 0
+        total_paid_to_producers = WithdrawalRequest.objects.filter(status__in=['Approved', 'Completed']).aggregate(total=Sum('amount'))['total'] or 0
         total_profit = total_revenue - total_paid_to_producers
         
         return Response({
@@ -165,52 +167,24 @@ class AdminUserDeleteView(AdminBaseView):
 class AdminProducersListView(AdminBaseView):
     @extend_schema(summary="List all producers with their stats (earnings, movies, withdrawals)")
     def get(self, request):
-        payments_sum = Payment.objects.filter(
-            movie__producer_profile=OuterRef('pk'),
-            status='Completed'
-        ).values('movie__producer_profile').annotate(
-            total=Sum('amount')
-        ).values('total')
-
-        withdrawn_sum = WithdrawalRequest.objects.filter(
-            producer=OuterRef('pk'),
-            status='Approved'
-        ).values('producer').annotate(
-            total=Sum('amount')
-        ).values('total')
-
-        pending_sum = WithdrawalRequest.objects.filter(
-            producer=OuterRef('pk'),
-            status='Pending'
-        ).values('producer').annotate(
-            total=Sum('amount')
-        ).values('total')
-
         producers = User.objects.filter(role='Producer').annotate(
             movies_uploaded_count=Count('uploaded_movies', distinct=True),
-            db_total_revenue=Coalesce(Subquery(payments_sum), 0),
-            db_total_withdrawn=Coalesce(Subquery(withdrawn_sum), 0),
-            db_pending_withdrawals=Coalesce(Subquery(pending_sum), 0),
         )
         data = []
         for p in producers:
-            total_revenue = getattr(p, 'db_total_revenue', 0)
-            earnings = (total_revenue * 70) // 100
-            
-            total_withdrawn = getattr(p, 'db_total_withdrawn', 0)
-            pending_withdrawals = getattr(p, 'db_pending_withdrawals', 0)
-            
+            wallet = get_producer_wallet(p)
             data.append({
                 'id': p.id,
                 'name': p.full_name,
                 'email': p.email,
                 'phone_number': p.phone_number,
                 'movies_uploaded': p.movies_uploaded_count,
-                'total_earnings': earnings,
-                'balance': earnings - total_withdrawn,
-                'pending_withdrawals': pending_withdrawals,
+                'total_earnings': wallet['total_earnings'],
+                'balance': wallet['wallet_balance'],
+                'pending_withdrawals': wallet['pending_withdrawals'],
+                'total_withdrawn': wallet['total_withdrawn'],
                 'is_active': p.is_active,
-                'date_joined': p.date_joined
+                'date_joined': p.date_joined,
             })
         return Response(data)
 
@@ -272,3 +246,109 @@ class AdminCreateProducerView(AdminBaseView):
             'role': user.role,
             'generated_password': password,
         }, status=status.HTTP_201_CREATED)
+
+
+# ─────────────────────────────────────────────
+# Withdrawal Request Management
+# ─────────────────────────────────────────────
+
+class AdminWithdrawalsListView(AdminBaseView):
+    @extend_schema(
+        summary="List all producer withdrawal requests",
+        description="Optionally filter by status: ?status=Pending|Approved|Completed|Rejected",
+    )
+    def get(self, request):
+        qs = WithdrawalRequest.objects.select_related('producer').order_by('-created_at')
+        status_filter = request.GET.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        page = int(request.GET.get('page', 1))
+        page_size = 20
+        start = (page - 1) * page_size
+        total = qs.count()
+
+        return Response({
+            'page': page,
+            'results': AdminWithdrawalRequestSerializer(qs[start:start + page_size], many=True).data,
+            'total_results': total,
+            'total_pages': (total + page_size - 1) // page_size,
+        })
+
+
+class AdminWithdrawalApproveView(AdminBaseView):
+    @extend_schema(summary="Approve a withdrawal request (Pending → Approved)")
+    def post(self, request, withdrawal_id):
+        withdrawal = get_object_or_404(WithdrawalRequest, id=withdrawal_id)
+
+        if withdrawal.status != 'Pending':
+            return Response(
+                {'error': f"Cannot approve a '{withdrawal.status}' withdrawal. Only Pending requests can be approved."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        withdrawal.status = 'Approved'
+        withdrawal.processed_at = timezone.now()
+        withdrawal.save(update_fields=['status', 'processed_at'])
+
+        return Response({
+            'message': 'Withdrawal approved successfully.',
+            'id': withdrawal.id,
+            'status': withdrawal.status,
+            'processed_at': withdrawal.processed_at,
+        })
+
+
+class AdminWithdrawalCompleteView(AdminBaseView):
+    @extend_schema(
+        summary="Mark a withdrawal as completed (Approved → Completed)",
+        description="Finance confirms the bank/MoMo transfer. Completed records are immutable.",
+    )
+    def post(self, request, withdrawal_id):
+        withdrawal = get_object_or_404(WithdrawalRequest, id=withdrawal_id)
+
+        if withdrawal.status == 'Completed':
+            return Response(
+                {'error': 'This withdrawal is already completed and cannot be modified.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if withdrawal.status != 'Approved':
+            return Response(
+                {'error': f"Cannot complete a '{withdrawal.status}' withdrawal. Only Approved requests can be completed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        withdrawal.status = 'Completed'
+        withdrawal.save(update_fields=['status'])
+
+        return Response({
+            'message': 'Withdrawal marked as completed.',
+            'id': withdrawal.id,
+            'status': withdrawal.status,
+        })
+
+
+class AdminWithdrawalRejectView(AdminBaseView):
+    @extend_schema(
+        summary="Reject a withdrawal request (Pending/Approved → Rejected)",
+        description="Rejected amounts are automatically freed back to the producer's wallet balance.",
+    )
+    def post(self, request, withdrawal_id):
+        withdrawal = get_object_or_404(WithdrawalRequest, id=withdrawal_id)
+
+        if withdrawal.status not in ('Pending', 'Approved'):
+            return Response(
+                {'error': f"Cannot reject a '{withdrawal.status}' withdrawal."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        withdrawal.status = 'Rejected'
+        withdrawal.processed_at = timezone.now()
+        withdrawal.save(update_fields=['status', 'processed_at'])
+
+        return Response({
+            'message': 'Withdrawal rejected.',
+            'id': withdrawal.id,
+            'status': withdrawal.status,
+        })
