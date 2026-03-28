@@ -1,6 +1,7 @@
 from django.urls import path
 from .admin_views import (
     AdminDashboardOverviewView,
+    AdminTransactionHistoryView,
     AdminViewersListView,
     AdminViewerPaymentsView,
     AdminUserSuspendView,
@@ -13,6 +14,7 @@ from .admin_views import (
 
 urlpatterns = [
     path('overview/', AdminDashboardOverviewView.as_view(), name='admin-dashboard-overview'),
+    path('transactions/', AdminTransactionHistoryView.as_view(), name='admin-dashboard-transactions'),
     
     # Viewers
     path('viewers/', AdminViewersListView.as_view(), name='admin-viewers-list'),

@@ -5,11 +5,11 @@ from .models import Movie
 class MovieSerializer(serializers.ModelSerializer):
     """Basic movie serializer for list views"""
 
-    # FileField.url already returns a full https:// S3/CloudFront URL
     thumbnail_url = serializers.SerializerMethodField()
     backdrop_url = serializers.SerializerMethodField()
     trailer_url = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
+    subtitles_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Movie
@@ -21,6 +21,7 @@ class MovieSerializer(serializers.ModelSerializer):
             'backdrop_url',
             'trailer_url',
             'video_url',
+            'subtitles_url',
             'price',
             'rating',
             'release_date',
@@ -45,6 +46,10 @@ class MovieSerializer(serializers.ModelSerializer):
         """Returns the full video URL — for testing frontend playback."""
         return obj.video_file.url if obj.video_file else None
 
+    def get_subtitles_url(self, obj):
+        """Returns the URL for the subtitles file."""
+        return obj.subtitles_file.url if obj.subtitles_file else None
+
 
 class MovieDetailSerializer(serializers.ModelSerializer):
     """Detailed movie serializer - includes trailer info"""
@@ -53,6 +58,7 @@ class MovieDetailSerializer(serializers.ModelSerializer):
     backdrop_url = serializers.SerializerMethodField()
     trailer_url = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
+    subtitles_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Movie
@@ -65,6 +71,7 @@ class MovieDetailSerializer(serializers.ModelSerializer):
             'trailer_url',
             'trailer_duration_seconds',
             'video_url',
+            'subtitles_url',
             'price',
             'views',
             'rating',
@@ -89,6 +96,9 @@ class MovieDetailSerializer(serializers.ModelSerializer):
 
     def get_video_url(self, obj):
         return obj.video_file.url if obj.video_file else None
+
+    def get_subtitles_url(self, obj):
+        return obj.subtitles_file.url if obj.subtitles_file else None
 
 
 class MovieVideoAccessSerializer(serializers.ModelSerializer):
@@ -137,6 +147,7 @@ class MovieCreateSerializer(serializers.ModelSerializer):
             'backdrop',
             'video_file',
             'trailer_file',
+            'subtitles_file',
             'price',
             'release_date',
             'duration_minutes',

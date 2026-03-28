@@ -41,6 +41,13 @@ class Movie(models.Model):
         null=True,
         help_text='Upload trailer video file (optional)'
     )
+    subtitles_file = models.FileField(
+        upload_to='movies/subtitles/',
+        validators=[FileExtensionValidator(allowed_extensions=['vtt', 'srt'])],
+        blank=True,
+        null=True,
+        help_text='Upload subtitles file in VTT or SRT format (optional)'
+    )
     
     # Cast, Genres, Producer
     cast = models.JSONField(
