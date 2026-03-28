@@ -18,6 +18,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from apps.users.permissions import IsAdminRole
+from apps.users.serializers import AdminCreateProducerSerializer
 from apps.movies.models import Movie
 from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet
