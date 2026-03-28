@@ -96,6 +96,24 @@ class Movie(models.Model):
     views = models.PositiveIntegerField(default=0)
     rating = models.FloatField(default=0.0)
     
+    # HLS Adaptive Bitrate Streaming
+    HLS_STATUS_CHOICES = [
+        ('not_started', 'Not Started'),
+        ('processing',  'Processing'),
+        ('ready',       'Ready'),
+        ('failed',      'Failed'),
+    ]
+    hls_status = models.CharField(
+        max_length=20,
+        choices=HLS_STATUS_CHOICES,
+        default='not_started',
+        db_index=True,
+    )
+    hls_master_key = models.CharField(max_length=500, blank=True, null=True)
+    hls_error_message = models.TextField(blank=True, null=True)
+    hls_started_at = models.DateTimeField(null=True, blank=True)
+    hls_completed_at = models.DateTimeField(null=True, blank=True)
+
     # Status
     release_date = models.DateField()
     is_active = models.BooleanField(default=True)
@@ -139,3 +157,10 @@ class Movie(models.Model):
     def trailer_url(self):
         """Get full URL for trailer file"""
         return self.trailer_file.url if self.trailer_file else None
+
+    @property
+    def hls_url(self):
+        """Get full CloudFront URL for HLS master playlist"""
+        if self.hls_status == 'ready' and self.hls_master_key:
+            return f"https://{settings.AWS_S3_CUSTOM_DOMAIN}/{self.hls_master_key}"
+        return None

@@ -132,6 +132,7 @@ class MovieVideoAccessSerializer(serializers.ModelSerializer):
     video_url = serializers.SerializerMethodField()
     trailer_url = serializers.SerializerMethodField()
     access_granted = serializers.SerializerMethodField()
+    hls_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Movie
@@ -141,8 +142,13 @@ class MovieVideoAccessSerializer(serializers.ModelSerializer):
             'video_url',
             'trailer_url',
             'duration_minutes',
-            'access_granted'
+            'access_granted',
+            'hls_status',
+            'hls_url',
         ]
+
+    def get_hls_url(self, obj):
+        return obj.hls_url
 
     def get_video_url(self, obj):
         return obj.video_file.url if obj.video_file else None

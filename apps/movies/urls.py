@@ -10,6 +10,7 @@ from .views import (
     MovieImagesView,
     MovieStreamView,
     MovieTrailerView,
+    MovieTranscodeView,
     MovieCreateView,
     MovieUpdateView,
     MovieDeleteView,
@@ -38,6 +39,7 @@ urlpatterns = [
     path('<int:id>/images/', MovieImagesView.as_view(), name='movie-images'),
     path('<int:id>/stream/', MovieStreamView.as_view(), name='movie-stream'),
     path('<int:id>/trailer/', MovieTrailerView.as_view(), name='movie-trailer'),
+    path('<int:id>/transcode/', MovieTranscodeView.as_view(), name='movie-transcode'),
 
     # ── S3 Multipart Upload (admin) ────────────────────────────────────
     path('upload/initiate/', InitiateMultipartUploadView.as_view(), name='upload-initiate'),

@@ -356,11 +356,65 @@ class MovieStreamView(APIView):
 
         movie.increment_views()
         serializer = MovieVideoAccessSerializer(movie, context={'request': request})
+        if movie.hls_status == 'ready' and movie.hls_url:
+            return Response({
+                'movie': serializer.data,
+                'stream_url': movie.hls_url,
+                'stream_type': 'hls',
+                'hls_status': movie.hls_status,
+                'fallback_url': movie.video_url,
+                'message': 'Development mode - payment not required',
+            })
         return Response({
             'movie': serializer.data,
             'stream_url': movie.video_url,
+            'stream_type': 'mp4',
+            'hls_status': movie.hls_status,
+            'fallback_url': None,
             'message': 'Development mode - payment not required',
         })
+
+
+class MovieTranscodeView(APIView):
+    """Trigger HLS transcoding for a movie (admin only)."""
+    permission_classes = [IsAdminRole]
+
+    @extend_schema(
+        tags=['Movies - Media'],
+        summary='Trigger HLS transcoding',
+        description=(
+            'Starts HLS adaptive bitrate transcoding for a movie in a background thread. '
+            'Returns immediately with status 202. Poll the movie detail or stream endpoint '
+            'to check `hls_status` (processing → ready / failed).'
+        ),
+        responses={
+            202: inline_serializer(
+                name='TranscodeResponse',
+                fields={'status': drf_serializers.CharField(), 'hls_status': drf_serializers.CharField()}
+            ),
+            400: OpenApiResponse(description='Movie has no video file'),
+            404: OpenApiResponse(description='Movie not found'),
+            409: OpenApiResponse(description='Transcoding already in progress'),
+        },
+    )
+    def post(self, request, id):
+        try:
+            movie = Movie.objects.get(id=id)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not movie.video_file:
+            return Response({'error': 'Movie has no video file'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if movie.hls_status == 'processing':
+            return Response({'error': 'Transcoding already in progress'}, status=status.HTTP_409_CONFLICT)
+
+        from .transcoding import start_hls_transcode
+        start_hls_transcode(movie.id)
+        return Response(
+            {'status': 'transcoding_started', 'hls_status': 'processing'},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class MovieTrailerView(APIView):
@@ -754,9 +808,21 @@ class CompleteMultipartUploadView(APIView):
                 UploadId=upload_id,
                 MultipartUpload={'Parts': parts},
             )
-            return Response({'status': 'complete'})
         except Exception as e:
             return Response({'error': str(e)}, status=500)
+
+        hls_triggered = False
+        movie_id = request.data.get('movie_id')
+        field_name = request.data.get('field_name')
+        if movie_id and field_name == 'video_file':
+            try:
+                from .transcoding import start_hls_transcode
+                start_hls_transcode(int(movie_id))
+                hls_triggered = True
+            except Exception:
+                pass  # Never fail the upload response due to transcode kick-off errors
+
+        return Response({'status': 'complete', 'hls_triggered': hls_triggered})
 
 
 class AbortMultipartUploadView(APIView):

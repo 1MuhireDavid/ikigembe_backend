@@ -278,3 +278,8 @@ X_FRAME_OPTIONS = 'SAMEORIGIN'
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# HLS Adaptive Bitrate Streaming
+FFMPEG_PATH = os.getenv('FFMPEG_PATH', 'ffmpeg')
+HLS_SEGMENT_DURATION = 6
+HLS_TEMP_DIR = BASE_DIR / 'tmp' / 'hls'
