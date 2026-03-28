@@ -1,3 +1,5 @@
+import secrets
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -235,3 +237,38 @@ class AdminProducerSuspendView(AdminBaseView):
         producer.is_active = False
         producer.save(update_fields=['is_active'])
         return Response({'message': 'Producer suspended successfully'})
+
+
+class AdminCreateProducerView(AdminBaseView):
+    @extend_schema(summary="Create a new producer account with an auto-generated password")
+    def post(self, request):
+        email = request.data.get('email') or None
+        first_name = request.data.get('first_name', '')
+        last_name = request.data.get('last_name', '')
+        phone_number = request.data.get('phone_number') or None
+
+        if not email and not phone_number:
+            return Response({'error': 'Email or phone number is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if email and User.objects.filter(email=email).exists():
+            return Response({'error': 'A user with this email already exists.'}, status=status.HTTP_400_BAD_REQUEST)
+        if phone_number and User.objects.filter(phone_number=phone_number).exists():
+            return Response({'error': 'A user with this phone number already exists.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        password = secrets.token_urlsafe(10)
+        user = User.objects.create_user(
+            email=email,
+            phone_number=phone_number,
+            first_name=first_name,
+            last_name=last_name,
+            password=password,
+            role='Producer',
+            is_active=True,
+        )
+        return Response({
+            'id': user.id,
+            'email': user.email,
+            'phone_number': user.phone_number,
+            'full_name': user.full_name,
+            'role': user.role,
+            'generated_password': password,
+        }, status=status.HTTP_201_CREATED)

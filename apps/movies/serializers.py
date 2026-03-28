@@ -101,6 +101,31 @@ class MovieDetailSerializer(serializers.ModelSerializer):
         return obj.subtitles_file.url if obj.subtitles_file else None
 
 
+class ProducerMovieListSerializer(serializers.ModelSerializer):
+    """Read-only serializer for the producer's movie monitoring panel."""
+    thumbnail_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Movie
+        fields = [
+            'id',
+            'title',
+            'thumbnail_url',
+            'price',
+            'views',
+            'rating',
+            'release_date',
+            'duration_minutes',
+            'is_active',
+            'has_free_preview',
+            'created_at',
+            'genres',
+        ]
+
+    def get_thumbnail_url(self, obj):
+        return obj.thumbnail.url if obj.thumbnail else None
+
+
 class MovieVideoAccessSerializer(serializers.ModelSerializer):
     """Full video access serializer"""
 

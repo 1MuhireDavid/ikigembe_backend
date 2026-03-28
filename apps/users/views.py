@@ -349,8 +349,13 @@ class TokenRefreshView(APIView):
 
             user_id = refresh.payload.get('user_id')
 
-            user = User.objects.filter(pk=user_id).only('id', 'role', 'email').first()
+            user = User.objects.filter(pk=user_id).only('id', 'role', 'email', 'is_active').first()
             if user:
+                if not user.is_active:
+                    return Response(
+                        {'error': 'This account has been deactivated.'},
+                        status=status.HTTP_401_UNAUTHORIZED,
+                    )
                 access['role'] = user.role
                 access['email'] = user.email or ''
 
@@ -418,3 +423,38 @@ class LogoutView(APIView):
             pass  # Already invalid — that's fine
 
         return Response(status=status.HTTP_205_RESET_CONTENT)
+
+
+# ─────────────────────────────────────────────
+# Change Password
+# ─────────────────────────────────────────────
+
+class ChangePasswordView(APIView):
+    """Allow an authenticated user to change their password."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=["Authentication"],
+        summary="Change password",
+        description="Change the authenticated user's password. Requires the current password for verification.",
+    )
+    def post(self, request):
+        current = request.data.get('current_password')
+        new = request.data.get('new_password')
+        confirm = request.data.get('confirm_password')
+
+        if not current or not new or not confirm:
+            return Response(
+                {'error': 'current_password, new_password, and confirm_password are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not request.user.check_password(current):
+            return Response({'error': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+        if new != confirm:
+            return Response({'error': 'Passwords do not match.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(new) < 8:
+            return Response({'error': 'Password must be at least 8 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        request.user.set_password(new)
+        request.user.save(update_fields=['password'])
+        return Response({'message': 'Password updated successfully.'})

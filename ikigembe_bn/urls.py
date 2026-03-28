@@ -36,5 +36,7 @@ urlpatterns = [
     path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
     # Admin Dashboard
     path('api/admin/dashboard/', include('apps.users.admin_urls')),
+    # Producer Dashboard
+    path('api/producer/dashboard/', include('apps.movies.producer_urls')),
 ]
 
