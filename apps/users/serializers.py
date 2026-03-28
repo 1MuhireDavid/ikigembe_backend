@@ -18,6 +18,7 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'email', 'phone_number',
             'first_name', 'last_name', 'full_name',
             'avatar_url', 'is_staff', 'role', 'date_joined',
+            'notify_new_trailers', 'notify_new_movies', 'notify_promotions',
         ]
         read_only_fields = fields
         extra_kwargs = {
@@ -29,7 +30,16 @@ class UserSerializer(serializers.ModelSerializer):
             'is_staff': {'help_text': 'Whether user has staff privileges.'},
             'role': {'help_text': 'User role: Admin, Producer, or Viewer.'},
             'date_joined': {'help_text': 'Date and time when the account was created.'},
+            'notify_new_trailers': {'help_text': 'Receive notifications for new trailers.'},
+            'notify_new_movies': {'help_text': 'Receive notifications for new movie releases.'},
+            'notify_promotions': {'help_text': 'Receive notifications for promotions and deals.'},
         }
+
+
+class NotificationPreferencesSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['notify_new_trailers', 'notify_new_movies', 'notify_promotions']
 
 
 
@@ -87,7 +97,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         fields = ['email', 'phone_number', 'password', 'password_confirm', 'first_name', 'last_name']
 
     def validate_email(self, value):
-        if value == '':
+        if not value:
             return None
         return value.lower().strip()
 

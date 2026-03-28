@@ -96,6 +96,24 @@ class Movie(models.Model):
     views = models.PositiveIntegerField(default=0)
     rating = models.FloatField(default=0.0)
     
+    # HLS Adaptive Bitrate Streaming
+    HLS_STATUS_CHOICES = [
+        ('not_started', 'Not Started'),
+        ('processing',  'Processing'),
+        ('ready',       'Ready'),
+        ('failed',      'Failed'),
+    ]
+    hls_status = models.CharField(
+        max_length=20,
+        choices=HLS_STATUS_CHOICES,
+        default='not_started',
+        db_index=True,
+    )
+    hls_master_key = models.CharField(max_length=500, blank=True, null=True)
+    hls_error_message = models.TextField(blank=True, null=True)
+    hls_started_at = models.DateTimeField(null=True, blank=True)
+    hls_completed_at = models.DateTimeField(null=True, blank=True)
+
     # Status
     release_date = models.DateField()
     is_active = models.BooleanField(default=True)
@@ -139,3 +157,41 @@ class Movie(models.Model):
     def trailer_url(self):
         """Get full URL for trailer file"""
         return self.trailer_file.url if self.trailer_file else None
+
+    @property
+    def hls_url(self):
+        """Get full CloudFront URL for HLS master playlist"""
+        if self.hls_status == 'ready' and self.hls_master_key:
+            return f"https://{settings.AWS_S3_CUSTOM_DOMAIN}/{self.hls_master_key}"
+        return None
+
+
+class WatchProgress(models.Model):
+    """
+    Tracks how far a user has watched a movie, enabling "Continue Watching".
+    One record per (user, movie) pair — updated in place on each progress save.
+    """
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='watch_progress',
+    )
+    movie = models.ForeignKey(
+        Movie,
+        on_delete=models.CASCADE,
+        related_name='watch_progress',
+    )
+    # Playback position in seconds from the start of the movie.
+    progress_seconds = models.PositiveIntegerField(default=0)
+    # Total duration in seconds — stored here so the frontend doesn't need a
+    # second request to calculate the completion percentage.
+    duration_seconds = models.PositiveIntegerField(default=0)
+    completed = models.BooleanField(default=False)
+    last_watched_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('user', 'movie')
+        ordering = ['-last_watched_at']
+
+    def __str__(self):
+        return f'{self.user} → {self.movie.title} ({self.progress_seconds}s)'

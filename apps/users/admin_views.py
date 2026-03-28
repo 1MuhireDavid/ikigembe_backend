@@ -1,44 +1,81 @@
+import secrets
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, serializers as drf_serializers
 from rest_framework.permissions import IsAuthenticated
-from drf_spectacular.utils import extend_schema, OpenApiResponse, inline_serializer
-from rest_framework import serializers as drf_serializers
-from django.db.models import Sum, Count, Q, OuterRef, Subquery
+from drf_spectacular.utils import (
+    extend_schema,
+    inline_serializer,
+    OpenApiParameter,
+    OpenApiResponse,
+)
+from drf_spectacular.types import OpenApiTypes
+from django.db.models import Sum, Count, Q
 from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 
 from apps.users.permissions import IsAdminRole
 from apps.users.serializers import AdminCreateProducerSerializer
 from apps.movies.models import Movie
 from apps.payments.models import Payment, WithdrawalRequest
+from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet
 
 User = get_user_model()
+
+_TAG = 'Admin Dashboard'
+
+
+def _safe_page(request):
+    """Return a valid page number from ?page=, defaulting to 1 for any invalid input."""
+    try:
+        return max(1, int(request.GET.get('page', 1)))
+    except (TypeError, ValueError):
+        return 1
 
 
 class AdminBaseView(APIView):
     permission_classes = [IsAuthenticated, IsAdminRole]
 
 
+# ─────────────────────────────────────────────
+# Dashboard Overview
+# ─────────────────────────────────────────────
+
 class AdminDashboardOverviewView(AdminBaseView):
     @extend_schema(
-        tags=['Admin - Dashboard'],
-        summary='Get platform overview',
-        description='Returns top-level stats: total viewers, producers, movies, views, and financial summary.',
+        tags=[_TAG],
+        summary='Platform activity overview',
+        description=(
+            'Returns platform-wide counters and a full financials breakdown. '
+            'Revenue split: 70% producer / 30% Ikigembe commission.'
+        ),
         responses={
             200: inline_serializer(
                 name='DashboardOverview',
                 fields={
-                    'total_viewers': drf_serializers.IntegerField(),
-                    'total_producers': drf_serializers.IntegerField(),
-                    'total_movies': drf_serializers.IntegerField(),
-                    'total_views': drf_serializers.IntegerField(),
-                    'financials': drf_serializers.DictField(),
-                }
+                    'total_viewers': drf_serializers.IntegerField(help_text='Total registered viewer accounts'),
+                    'total_producers': drf_serializers.IntegerField(help_text='Total registered producer accounts'),
+                    'total_movies': drf_serializers.IntegerField(help_text='Total movies in the system'),
+                    'total_views': drf_serializers.IntegerField(help_text='Sum of all movie view counts'),
+                    'financials': inline_serializer(
+                        name='DashboardFinancials',
+                        fields={
+                            'total_revenue': drf_serializers.IntegerField(help_text='All-time completed payment revenue (RWF)'),
+                            'producer_revenue': drf_serializers.IntegerField(help_text='70% share owed to producers (RWF)'),
+                            'ikigembe_commission': drf_serializers.IntegerField(help_text='30% platform commission (RWF)'),
+                            'revenue_today': drf_serializers.IntegerField(help_text='Revenue from today (RWF)'),
+                            'revenue_this_month': drf_serializers.IntegerField(help_text='Revenue from current calendar month (RWF)'),
+                            'total_paid_to_producers': drf_serializers.IntegerField(help_text='Sum of Approved + Completed withdrawal requests (RWF)'),
+                            'total_profit': drf_serializers.IntegerField(help_text='total_revenue minus total_paid_to_producers (RWF)'),
+                        },
+                    ),
+                },
             ),
-            401: OpenApiResponse(description='Authentication required'),
-            403: OpenApiResponse(description='Admin access required'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
         },
     )
     def get(self, request):
@@ -46,22 +83,22 @@ class AdminDashboardOverviewView(AdminBaseView):
         total_producers = User.objects.filter(role='Producer').count()
         total_movies = Movie.objects.count()
         total_views = Movie.objects.aggregate(total=Sum('views'))['total'] or 0
-        
+
         from django.utils import timezone
         now = timezone.now()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         month_start = today_start.replace(day=1)
-        
+
         total_revenue = Payment.objects.filter(status='Completed').aggregate(total=Sum('amount'))['total'] or 0
         producer_revenue = (total_revenue * 70) // 100
         ikigembe_commission = total_revenue - producer_revenue
-        
+
         revenue_today = Payment.objects.filter(status='Completed', created_at__gte=today_start).aggregate(total=Sum('amount'))['total'] or 0
         revenue_this_month = Payment.objects.filter(status='Completed', created_at__gte=month_start).aggregate(total=Sum('amount'))['total'] or 0
-        
-        total_paid_to_producers = WithdrawalRequest.objects.filter(status='Approved').aggregate(total=Sum('amount'))['total'] or 0
+
+        total_paid_to_producers = WithdrawalRequest.objects.filter(status__in=['Approved', 'Completed']).aggregate(total=Sum('amount'))['total'] or 0
         total_profit = total_revenue - total_paid_to_producers
-        
+
         return Response({
             'total_viewers': total_viewers,
             'total_producers': total_producers,
@@ -78,68 +115,91 @@ class AdminDashboardOverviewView(AdminBaseView):
             }
         })
 
+
+# ─────────────────────────────────────────────
+# Transaction History
+# ─────────────────────────────────────────────
+
 class AdminTransactionHistoryView(AdminBaseView):
-    @extend_schema(summary="Get all platform transactions (payments, withdrawals, pending withdrawals)")
+    @extend_schema(
+        tags=[_TAG],
+        summary='All platform transactions',
+        description=(
+            'Returns three lists: completed/failed movie payments, '
+            'processed withdrawal requests (Approved/Completed/Rejected), '
+            'and pending withdrawal requests awaiting admin action.'
+        ),
+        responses={
+            200: inline_serializer(
+                name='TransactionHistory',
+                fields={
+                    'payments': inline_serializer(
+                        name='PaymentItem',
+                        fields={
+                            'id': drf_serializers.IntegerField(),
+                            'user': drf_serializers.CharField(help_text='Full name of the paying viewer'),
+                            'movie_title': drf_serializers.CharField(),
+                            'amount': drf_serializers.IntegerField(help_text='Amount paid in RWF'),
+                            'status': drf_serializers.CharField(help_text='Pending | Completed | Failed'),
+                            'created_at': drf_serializers.DateTimeField(),
+                        },
+                        many=True,
+                    ),
+                    'withdrawals': AdminWithdrawalRequestSerializer(many=True),
+                    'pending_withdrawals': AdminWithdrawalRequestSerializer(many=True),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
     def get(self, request):
         payments = Payment.objects.all().select_related('user', 'movie').order_by('-created_at')
         withdrawals = WithdrawalRequest.objects.exclude(status='Pending').select_related('producer').order_by('-created_at')
         pending_withdrawals = WithdrawalRequest.objects.filter(status='Pending').select_related('producer').order_by('-created_at')
-        
+
         payments_data = [{
             'id': p.id,
             'user': p.user.full_name,
             'movie_title': p.movie.title if p.movie else 'Unknown',
             'amount': p.amount,
             'status': p.status,
-            'created_at': p.created_at
+            'created_at': p.created_at,
         } for p in payments]
-        
-        withdrawals_data = [{
-            'id': w.id,
-            'producer': w.producer.full_name,
-            'amount': w.amount,
-            'status': w.status,
-            'created_at': w.created_at,
-            'processed_at': w.processed_at
-        } for w in withdrawals]
-        
-        pending_data = [{
-            'id': w.id,
-            'producer': w.producer.full_name,
-            'amount': w.amount,
-            'status': w.status,
-            'created_at': w.created_at
-        } for w in pending_withdrawals]
-        
+
         return Response({
             'payments': payments_data,
-            'withdrawals': withdrawals_data,
-            'pending_withdrawals': pending_data
+            'withdrawals': AdminWithdrawalRequestSerializer(withdrawals, many=True).data,
+            'pending_withdrawals': AdminWithdrawalRequestSerializer(pending_withdrawals, many=True).data,
         })
 
 
+# ─────────────────────────────────────────────
+# Viewers
+# ─────────────────────────────────────────────
+
 class AdminViewersListView(AdminBaseView):
     @extend_schema(
-        tags=['Admin - Viewers'],
+        tags=[_TAG],
         summary='List all viewers',
-        description='Returns a list of all viewer accounts with their watch count and total payments made.',
+        description='Returns every viewer account with purchase statistics.',
         responses={
             200: inline_serializer(
-                name='ViewerListItem',
+                name='ViewerItem',
                 fields={
                     'id': drf_serializers.IntegerField(),
-                    'name': drf_serializers.CharField(),
-                    'email': drf_serializers.EmailField(),
-                    'phone_number': drf_serializers.CharField(),
-                    'movies_watched': drf_serializers.IntegerField(),
-                    'payments_made': drf_serializers.IntegerField(),
+                    'name': drf_serializers.CharField(help_text='Full name'),
+                    'email': drf_serializers.EmailField(allow_null=True),
+                    'phone_number': drf_serializers.CharField(allow_null=True),
+                    'movies_watched': drf_serializers.IntegerField(help_text='Number of movies purchased'),
+                    'payments_made': drf_serializers.IntegerField(help_text='Total amount spent in RWF'),
                     'is_active': drf_serializers.BooleanField(),
                     'date_joined': drf_serializers.DateTimeField(),
                 },
                 many=True,
             ),
-            401: OpenApiResponse(description='Authentication required'),
-            403: OpenApiResponse(description='Admin access required'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
         },
     )
     def get(self, request):
@@ -164,23 +224,23 @@ class AdminViewersListView(AdminBaseView):
 
 class AdminViewerPaymentsView(AdminBaseView):
     @extend_schema(
-        tags=['Admin - Viewers'],
-        summary="Get a viewer's payment history",
-        description='Returns the full payment history for a specific viewer, ordered by most recent first.',
+        tags=[_TAG],
+        summary="A specific viewer's payment history",
+        description='Returns all movie purchases made by the given viewer, newest first.',
         responses={
             200: inline_serializer(
                 name='ViewerPaymentItem',
                 fields={
                     'id': drf_serializers.IntegerField(),
                     'movie_title': drf_serializers.CharField(),
-                    'amount': drf_serializers.IntegerField(),
-                    'status': drf_serializers.CharField(),
+                    'amount': drf_serializers.IntegerField(help_text='Amount paid in RWF'),
+                    'status': drf_serializers.CharField(help_text='Pending | Completed | Failed'),
                     'created_at': drf_serializers.DateTimeField(),
                 },
                 many=True,
             ),
-            401: OpenApiResponse(description='Authentication required'),
-            403: OpenApiResponse(description='Admin access required'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
             404: OpenApiResponse(description='Viewer not found'),
         },
     )
@@ -199,22 +259,30 @@ class AdminViewerPaymentsView(AdminBaseView):
         return Response(data)
 
 
+# ─────────────────────────────────────────────
+# User Management (Suspend / Delete)
+# ─────────────────────────────────────────────
+
 class AdminUserSuspendView(AdminBaseView):
     @extend_schema(
-        tags=['Admin - Users'],
-        summary='Suspend or unsuspend a user',
-        description='Toggles `is_active` for a Viewer or Producer. Cannot be used on Admin accounts.',
+        tags=[_TAG],
+        summary='Toggle user suspension',
+        description=(
+            'Toggles `is_active` on a Viewer or Producer account. '
+            'Suspended users cannot log in. Admin accounts cannot be suspended.'
+        ),
+        request=None,
         responses={
             200: inline_serializer(
-                name='SuspendUserResponse',
+                name='UserSuspendResponse',
                 fields={
-                    'message': drf_serializers.CharField(),
-                    'is_active': drf_serializers.BooleanField(),
+                    'message': drf_serializers.CharField(help_text='e.g. "User suspended successfully"'),
+                    'is_active': drf_serializers.BooleanField(help_text='New active state after the toggle'),
                 },
             ),
-            400: OpenApiResponse(description='Cannot suspend another Admin'),
-            401: OpenApiResponse(description='Authentication required'),
-            403: OpenApiResponse(description='Admin access required'),
+            400: OpenApiResponse(description='Cannot suspend an Admin account'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
             404: OpenApiResponse(description='User not found'),
         },
     )
@@ -222,7 +290,7 @@ class AdminUserSuspendView(AdminBaseView):
         user = get_object_or_404(User, id=user_id)
         if user.role == 'Admin':
             return Response({'error': 'Cannot suspend another Admin'}, status=status.HTTP_400_BAD_REQUEST)
-            
+
         user.is_active = not user.is_active
         user.save(update_fields=['is_active'])
         state = "activated" if user.is_active else "suspended"
@@ -231,14 +299,14 @@ class AdminUserSuspendView(AdminBaseView):
 
 class AdminUserDeleteView(AdminBaseView):
     @extend_schema(
-        tags=['Admin - Users'],
+        tags=[_TAG],
         summary='Delete a user account',
-        description='Permanently deletes a Viewer or Producer account. Cannot be used on Admin accounts.',
+        description='Permanently deletes a Viewer or Producer account. Admin accounts cannot be deleted.',
         responses={
             204: OpenApiResponse(description='User deleted successfully'),
-            400: OpenApiResponse(description='Cannot delete an Admin'),
-            401: OpenApiResponse(description='Authentication required'),
-            403: OpenApiResponse(description='Admin access required'),
+            400: OpenApiResponse(description='Cannot delete an Admin account'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
             404: OpenApiResponse(description='User not found'),
         },
     )
@@ -250,106 +318,119 @@ class AdminUserDeleteView(AdminBaseView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+# ─────────────────────────────────────────────
+# Producers
+# ─────────────────────────────────────────────
+
 class AdminProducersListView(AdminBaseView):
     @extend_schema(
-        tags=['Admin - Producers'],
-        summary='List all producers',
-        description='Returns all producer accounts with earnings, balance, movies uploaded, and pending withdrawal stats.',
+        tags=[_TAG],
+        summary='List all producers with earnings stats',
+        description='Returns every producer account enriched with wallet and movie upload statistics.',
         responses={
             200: inline_serializer(
-                name='ProducerListItem',
+                name='ProducerItem',
                 fields={
                     'id': drf_serializers.IntegerField(),
-                    'name': drf_serializers.CharField(),
-                    'email': drf_serializers.EmailField(),
-                    'phone_number': drf_serializers.CharField(),
+                    'name': drf_serializers.CharField(help_text='Full name'),
+                    'email': drf_serializers.EmailField(allow_null=True),
+                    'phone_number': drf_serializers.CharField(allow_null=True),
                     'movies_uploaded': drf_serializers.IntegerField(),
-                    'total_earnings': drf_serializers.IntegerField(),
-                    'balance': drf_serializers.IntegerField(),
-                    'pending_withdrawals': drf_serializers.IntegerField(),
+                    'total_earnings': drf_serializers.IntegerField(help_text='70% share of revenue from their movies (RWF)'),
+                    'balance': drf_serializers.IntegerField(help_text='Available balance for withdrawal (RWF)'),
+                    'pending_withdrawals': drf_serializers.IntegerField(help_text='Amount locked in pending withdrawal requests (RWF)'),
+                    'total_withdrawn': drf_serializers.IntegerField(help_text='Total amount paid out (RWF)'),
                     'is_active': drf_serializers.BooleanField(),
                     'date_joined': drf_serializers.DateTimeField(),
                 },
                 many=True,
             ),
-            401: OpenApiResponse(description='Authentication required'),
-            403: OpenApiResponse(description='Admin access required'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
         },
     )
     def get(self, request):
-        payments_sum = Payment.objects.filter(
-            movie__producer_profile=OuterRef('pk'),
-            status='Completed'
-        ).values('movie__producer_profile').annotate(
-            total=Sum('amount')
-        ).values('total')
-
-        withdrawn_sum = WithdrawalRequest.objects.filter(
-            producer=OuterRef('pk'),
-            status='Approved'
-        ).values('producer').annotate(
-            total=Sum('amount')
-        ).values('total')
-
-        pending_sum = WithdrawalRequest.objects.filter(
-            producer=OuterRef('pk'),
-            status='Pending'
-        ).values('producer').annotate(
-            total=Sum('amount')
-        ).values('total')
-
-        producers = User.objects.filter(role='Producer').annotate(
+        producers = list(User.objects.filter(role='Producer').annotate(
             movies_uploaded_count=Count('uploaded_movies', distinct=True),
-            db_total_revenue=Coalesce(Subquery(payments_sum), 0),
-            db_total_withdrawn=Coalesce(Subquery(withdrawn_sum), 0),
-            db_pending_withdrawals=Coalesce(Subquery(pending_sum), 0),
-        )
+        ))
+        producer_ids = [p.id for p in producers]
+
+        # Batch all financial aggregations in 3 queries (instead of 3–4 per producer).
+        revenue_map = {
+            row['movie__producer_profile_id']: row['total']
+            for row in Payment.objects.filter(
+                movie__producer_profile_id__in=producer_ids,
+                status='Completed',
+            ).values('movie__producer_profile_id').annotate(total=Sum('amount'))
+        }
+
+        locked_map = {
+            row['producer_id']: row['total']
+            for row in WithdrawalRequest.objects.filter(
+                producer_id__in=producer_ids,
+                status__in=['Pending', 'Approved', 'Completed'],
+            ).values('producer_id').annotate(total=Sum('amount'))
+        }
+
+        pending_map = {
+            row['producer_id']: row['total']
+            for row in WithdrawalRequest.objects.filter(
+                producer_id__in=producer_ids,
+                status='Pending',
+            ).values('producer_id').annotate(total=Sum('amount'))
+        }
+
+        withdrawn_map = {
+            row['producer_id']: row['total']
+            for row in WithdrawalRequest.objects.filter(
+                producer_id__in=producer_ids,
+                status='Completed',
+            ).values('producer_id').annotate(total=Sum('amount'))
+        }
+
         data = []
         for p in producers:
-            total_revenue = getattr(p, 'db_total_revenue', 0)
-            earnings = (total_revenue * 70) // 100
-            
-            total_withdrawn = getattr(p, 'db_total_withdrawn', 0)
-            pending_withdrawals = getattr(p, 'db_pending_withdrawals', 0)
-            
+            raw_revenue = revenue_map.get(p.id) or 0
+            total_earnings = (raw_revenue * 70) // 100
+            locked = locked_map.get(p.id) or 0
             data.append({
                 'id': p.id,
                 'name': p.full_name,
                 'email': p.email,
                 'phone_number': p.phone_number,
                 'movies_uploaded': p.movies_uploaded_count,
-                'total_earnings': earnings,
-                'balance': earnings - total_withdrawn,
-                'pending_withdrawals': pending_withdrawals,
+                'total_earnings': total_earnings,
+                'balance': total_earnings - locked,
+                'pending_withdrawals': pending_map.get(p.id) or 0,
+                'total_withdrawn': withdrawn_map.get(p.id) or 0,
                 'is_active': p.is_active,
-                'date_joined': p.date_joined
+                'date_joined': p.date_joined,
             })
         return Response(data)
 
 
 class AdminProducerApproveView(AdminBaseView):
     @extend_schema(
-        tags=['Admin - Producers'],
-        summary='Approve a producer account',
-        description='Sets `is_active=True` for a producer. Returns a message if already active.',
+        tags=[_TAG],
+        summary='Approve (activate) a producer account',
+        description='Sets `is_active=True` on a producer account, granting them access to the platform.',
+        request=None,
         responses={
             200: inline_serializer(
                 name='ProducerApproveResponse',
                 fields={'message': drf_serializers.CharField()},
             ),
-            401: OpenApiResponse(description='Authentication required'),
-            403: OpenApiResponse(description='Admin access required'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
             404: OpenApiResponse(description='Producer not found'),
         },
     )
     def post(self, request, user_id):
         producer = get_object_or_404(User, id=user_id, role='Producer')
-        
-        # In this implementation, 'approval' sets them to active 
-        # (they might be created as inactive by default in the future)
+
         if producer.is_active:
             return Response({'message': 'Producer is already approved (active)'}, status=status.HTTP_200_OK)
-            
+
         producer.is_active = True
         producer.save(update_fields=['is_active'])
         return Response({'message': 'Producer approved successfully'})
@@ -357,16 +438,17 @@ class AdminProducerApproveView(AdminBaseView):
 
 class AdminProducerSuspendView(AdminBaseView):
     @extend_schema(
-        tags=['Admin - Producers'],
+        tags=[_TAG],
         summary='Suspend a producer account',
-        description='Sets `is_active=False` for a producer, preventing them from logging in.',
+        description='Sets `is_active=False` on a producer. The producer cannot log in while suspended.',
+        request=None,
         responses={
             200: inline_serializer(
                 name='ProducerSuspendResponse',
                 fields={'message': drf_serializers.CharField()},
             ),
-            401: OpenApiResponse(description='Authentication required'),
-            403: OpenApiResponse(description='Admin access required'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
             404: OpenApiResponse(description='Producer not found'),
         },
     )
@@ -379,48 +461,270 @@ class AdminProducerSuspendView(AdminBaseView):
 
 class AdminCreateProducerView(AdminBaseView):
     @extend_schema(
-        tags=['Admin - Producers'],
+        tags=[_TAG],
         summary='Create a new producer account',
-        description='Creates a new user account with the Producer role. At least one of `email` or `phone_number` is required.',
-        request=AdminCreateProducerSerializer,
+        description=(
+            'Creates a producer account with an auto-generated temporary password. '
+            'The password is returned once — it is not stored in plain text and cannot be retrieved again. '
+            'At least one of `email` or `phone_number` is required.'
+        ),
+        request=inline_serializer(
+            name='CreateProducerRequest',
+            fields={
+                'email': drf_serializers.EmailField(required=False, allow_null=True, help_text='Optional if phone_number is provided'),
+                'phone_number': drf_serializers.CharField(required=False, allow_null=True, help_text='Optional if email is provided'),
+                'first_name': drf_serializers.CharField(required=False, allow_blank=True, default=''),
+                'last_name': drf_serializers.CharField(required=False, allow_blank=True, default=''),
+            },
+        ),
         responses={
             201: inline_serializer(
                 name='CreateProducerResponse',
                 fields={
-                    'message': drf_serializers.CharField(),
-                    'user': inline_serializer(
-                        name='CreatedProducerUser',
-                        fields={
-                            'id': drf_serializers.IntegerField(),
-                            'email': drf_serializers.EmailField(),
-                            'phone_number': drf_serializers.CharField(),
-                            'first_name': drf_serializers.CharField(),
-                            'last_name': drf_serializers.CharField(),
-                            'role': drf_serializers.CharField(),
-                        },
+                    'id': drf_serializers.IntegerField(),
+                    'email': drf_serializers.EmailField(allow_null=True),
+                    'phone_number': drf_serializers.CharField(allow_null=True),
+                    'full_name': drf_serializers.CharField(),
+                    'role': drf_serializers.CharField(help_text='Always "Producer"'),
+                    'generated_password': drf_serializers.CharField(
+                        help_text='Temporary password — share with the producer and ask them to change it immediately'
                     ),
                 },
             ),
-            400: OpenApiResponse(description='Validation error'),
-            401: OpenApiResponse(description='Authentication required'),
-            403: OpenApiResponse(description='Admin access required'),
+            400: OpenApiResponse(description='Validation error (missing identifier or duplicate email/phone)'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
         },
     )
     def post(self, request):
-        serializer = AdminCreateProducerSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        user = serializer.save()
-        
-        # We can re-use the detail representation if needed, 
-        # but for simplicity return the created data
+        email = request.data.get('email') or None
+        first_name = request.data.get('first_name', '')
+        last_name = request.data.get('last_name', '')
+        phone_number = request.data.get('phone_number') or None
+
+        if not email and not phone_number:
+            return Response({'error': 'Email or phone number is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if email and User.objects.filter(email=email).exists():
+            return Response({'error': 'A user with this email already exists.'}, status=status.HTTP_400_BAD_REQUEST)
+        if phone_number and User.objects.filter(phone_number=phone_number).exists():
+            return Response({'error': 'A user with this phone number already exists.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        password = secrets.token_urlsafe(10)
+        user = User.objects.create_user(
+            email=email,
+            phone_number=phone_number,
+            first_name=first_name,
+            last_name=last_name,
+            password=password,
+            role='Producer',
+            is_active=True,
+        )
         return Response({
-            'message': 'Producer created successfully',
-            'user': {
-                'id': user.id,
-                'email': user.email,
-                'phone_number': user.phone_number,
-                'first_name': user.first_name,
-                'last_name': user.last_name,
-                'role': user.role
-            }
+            'id': user.id,
+            'email': user.email,
+            'phone_number': user.phone_number,
+            'full_name': user.full_name,
+            'role': user.role,
+            'generated_password': password,
         }, status=status.HTTP_201_CREATED)
+
+
+# ─────────────────────────────────────────────
+# Withdrawal Request Management
+# ─────────────────────────────────────────────
+
+class AdminWithdrawalsListView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='List producer withdrawal requests',
+        description=(
+            'Returns paginated withdrawal requests. '
+            'Filter by `?status=Pending|Approved|Completed|Rejected`. '
+            'Without a filter, all statuses are returned.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='status',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                enum=['Pending', 'Approved', 'Completed', 'Rejected'],
+                description='Filter by withdrawal status',
+            ),
+            OpenApiParameter(
+                name='page',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                default=1,
+                description='Page number (20 results per page)',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='WithdrawalListResponse',
+                fields={
+                    'page': drf_serializers.IntegerField(),
+                    'total_results': drf_serializers.IntegerField(),
+                    'total_pages': drf_serializers.IntegerField(),
+                    'results': AdminWithdrawalRequestSerializer(many=True),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        qs = WithdrawalRequest.objects.select_related('producer').order_by('-created_at')
+        status_filter = request.GET.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        page = _safe_page(request)
+        page_size = 20
+        start = (page - 1) * page_size
+        total = qs.count()
+
+        return Response({
+            'page': page,
+            'results': AdminWithdrawalRequestSerializer(qs[start:start + page_size], many=True).data,
+            'total_results': total,
+            'total_pages': (total + page_size - 1) // page_size,
+        })
+
+
+class AdminWithdrawalApproveView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Approve a withdrawal request',
+        description='Moves the withdrawal from **Pending → Approved**. Only Pending requests can be approved.',
+        request=None,
+        responses={
+            200: inline_serializer(
+                name='WithdrawalActionResponse',
+                fields={
+                    'message': drf_serializers.CharField(),
+                    'id': drf_serializers.IntegerField(),
+                    'status': drf_serializers.CharField(help_text='New status after the action'),
+                },
+            ),
+            400: OpenApiResponse(description='Withdrawal is not in Pending state'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+            404: OpenApiResponse(description='Withdrawal not found'),
+        },
+    )
+    def post(self, request, withdrawal_id):
+        withdrawal = get_object_or_404(WithdrawalRequest, id=withdrawal_id)
+
+        if withdrawal.status != 'Pending':
+            return Response(
+                {'error': f"Cannot approve a '{withdrawal.status}' withdrawal. Only Pending requests can be approved."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        withdrawal.status = 'Approved'
+        withdrawal.processed_at = timezone.now()
+        withdrawal.save(update_fields=['status', 'processed_at'])
+
+        return Response({
+            'message': 'Withdrawal approved successfully.',
+            'id': withdrawal.id,
+            'status': withdrawal.status,
+            'processed_at': withdrawal.processed_at,
+        })
+
+
+class AdminWithdrawalCompleteView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Mark a withdrawal as completed',
+        description=(
+            'Moves the withdrawal from **Approved → Completed**. '
+            'Use this after the bank/MoMo transfer has been confirmed. '
+            'Completed records are immutable.'
+        ),
+        request=None,
+        responses={
+            200: inline_serializer(
+                name='WithdrawalCompleteResponse',
+                fields={
+                    'message': drf_serializers.CharField(),
+                    'id': drf_serializers.IntegerField(),
+                    'status': drf_serializers.CharField(help_text='New status after the action'),
+                },
+            ),
+            400: OpenApiResponse(description='Withdrawal is not in Approved state, or is already Completed'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+            404: OpenApiResponse(description='Withdrawal not found'),
+        },
+    )
+    def post(self, request, withdrawal_id):
+        withdrawal = get_object_or_404(WithdrawalRequest, id=withdrawal_id)
+
+        if withdrawal.status == 'Completed':
+            return Response(
+                {'error': 'This withdrawal is already completed and cannot be modified.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if withdrawal.status != 'Approved':
+            return Response(
+                {'error': f"Cannot complete a '{withdrawal.status}' withdrawal. Only Approved requests can be completed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        withdrawal.status = 'Completed'
+        withdrawal.processed_at = timezone.now()
+        withdrawal.save(update_fields=['status', 'processed_at'])
+
+        return Response({
+            'message': 'Withdrawal marked as completed.',
+            'id': withdrawal.id,
+            'status': withdrawal.status,
+        })
+
+
+class AdminWithdrawalRejectView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Reject a withdrawal request',
+        description=(
+            'Moves the withdrawal to **Rejected** from either Pending or Approved state. '
+            'The rejected amount is automatically freed back into the producer\'s wallet balance.'
+        ),
+        request=None,
+        responses={
+            200: inline_serializer(
+                name='WithdrawalRejectResponse',
+                fields={
+                    'message': drf_serializers.CharField(),
+                    'id': drf_serializers.IntegerField(),
+                    'status': drf_serializers.CharField(help_text='New status after the action'),
+                },
+            ),
+            400: OpenApiResponse(description='Withdrawal cannot be rejected (already Completed or Rejected)'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+            404: OpenApiResponse(description='Withdrawal not found'),
+        },
+    )
+    def post(self, request, withdrawal_id):
+        withdrawal = get_object_or_404(WithdrawalRequest, id=withdrawal_id)
+
+        if withdrawal.status not in ('Pending', 'Approved'):
+            return Response(
+                {'error': f"Cannot reject a '{withdrawal.status}' withdrawal."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        withdrawal.status = 'Rejected'
+        withdrawal.processed_at = timezone.now()
+        withdrawal.save(update_fields=['status', 'processed_at'])
+
+        return Response({
+            'message': 'Withdrawal rejected.',
+            'id': withdrawal.id,
+            'status': withdrawal.status,
+        })

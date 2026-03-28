@@ -28,17 +28,37 @@ class Payment(models.Model):
 class WithdrawalRequest(models.Model):
     """
     Model representing a producer requesting to withdraw earnings.
+    Workflow: Pending → Approved (Admin) → Completed (Finance).
+    Once Completed, the record is immutable (enforced in views).
     """
     STATUS_CHOICES = (
         ('Pending', 'Pending'),
         ('Approved', 'Approved'),
         ('Rejected', 'Rejected'),
+        ('Completed', 'Completed'),
     )
+    PAYMENT_METHOD_CHOICES = (
+        ('Bank', 'Bank'),
+        ('MoMo', 'MoMo'),
+    )
+    MOMO_PROVIDER_CHOICES = (
+        ('MTN', 'MTN'),
+        ('Airtel', 'Airtel'),
+    )
+
     producer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='withdrawal_requests', limit_choices_to={'role': 'Producer'})
     amount = models.PositiveIntegerField(help_text="Amount to withdraw in RWF")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
     created_at = models.DateTimeField(auto_now_add=True)
     processed_at = models.DateTimeField(null=True, blank=True)
+
+    # Payout destination
+    payment_method = models.CharField(max_length=10, choices=PAYMENT_METHOD_CHOICES, blank=True, null=True)
+    bank_name = models.CharField(max_length=100, blank=True, null=True)
+    account_number = models.CharField(max_length=50, blank=True, null=True)
+    account_holder_name = models.CharField(max_length=150, blank=True, null=True)
+    momo_number = models.CharField(max_length=20, blank=True, null=True)
+    momo_provider = models.CharField(max_length=10, choices=MOMO_PROVIDER_CHOICES, blank=True, null=True)
 
     class Meta:
         ordering = ['-created_at']

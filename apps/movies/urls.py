@@ -10,6 +10,7 @@ from .views import (
     MovieImagesView,
     MovieStreamView,
     MovieTrailerView,
+    MovieTranscodeView,
     MovieCreateView,
     MovieUpdateView,
     MovieDeleteView,
@@ -17,6 +18,9 @@ from .views import (
     SignMultipartUploadPartView,
     CompleteMultipartUploadView,
     AbortMultipartUploadView,
+    MyListView,
+    ContinueWatchingView,
+    WatchProgressView,
 )
 
 urlpatterns = [
@@ -26,6 +30,10 @@ urlpatterns = [
     path('now-playing/', NowPlayingMoviesView.as_view(), name='now-playing-movies'),
     path('top-rated/', TopRatedMoviesView.as_view(), name='top-rated-movies'),
     path('upcoming/', UpcomingMoviesView.as_view(), name='upcoming-movies'),
+
+    # ── Viewer: My List & Continue Watching ───────────────────────────
+    path('my-list/', MyListView.as_view(), name='my-list'),
+    path('continue-watching/', ContinueWatchingView.as_view(), name='continue-watching'),
 
     # ── Movie CRUD (admin) ─────────────────────────────────────────────
     path('create/', MovieCreateView.as_view(), name='movie-create'),
@@ -38,6 +46,8 @@ urlpatterns = [
     path('<int:id>/images/', MovieImagesView.as_view(), name='movie-images'),
     path('<int:id>/stream/', MovieStreamView.as_view(), name='movie-stream'),
     path('<int:id>/trailer/', MovieTrailerView.as_view(), name='movie-trailer'),
+    path('<int:id>/transcode/', MovieTranscodeView.as_view(), name='movie-transcode'),
+    path('<int:id>/progress/', WatchProgressView.as_view(), name='movie-progress'),
 
     # ── S3 Multipart Upload (admin) ────────────────────────────────────
     path('upload/initiate/', InitiateMultipartUploadView.as_view(), name='upload-initiate'),

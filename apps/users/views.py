@@ -1,3 +1,5 @@
+import uuid
+
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from google.auth.transport import requests as google_requests
@@ -12,6 +14,7 @@ from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
 from .serializers import (
     GoogleAuthSerializer,
     LoginSerializer,
+    NotificationPreferencesSerializer,
     RegisterSerializer,
     UserSerializer,
     RefreshSerializer
@@ -29,11 +32,26 @@ _ROLE_REDIRECT = {
 
 
 def _token_response(user):
-    """Build a standard token + user payload for a given user."""
+    """
+    Build a standard token + user payload for the given user.
+
+    Generates a new session key on every call (i.e. every login/register),
+    saves it to the user record, and embeds it in both the access and refresh
+    tokens.  The custom SingleSessionJWTAuthentication class reads this claim
+    on every request and rejects tokens whose key no longer matches the DB —
+    effectively kicking any previously logged-in device off the moment a new
+    login occurs.
+    """
+    session_key = str(uuid.uuid4())
+    user.active_session_key = session_key
+    user.save(update_fields=['active_session_key'])
+
     refresh = RefreshToken.for_user(user)
-    # Embed role in the JWT payload to prevent front-end spoofing
+    # Embed role in the JWT payload to prevent front-end spoofing.
+    refresh['session_key'] = session_key
     refresh.access_token['role'] = user.role
     refresh.access_token['email'] = user.email or ''
+    refresh.access_token['session_key'] = session_key
     return {
         'access': str(refresh.access_token),
         'refresh': str(refresh),
@@ -347,10 +365,31 @@ class TokenRefreshView(APIView):
 
             user_id = refresh.payload.get('user_id')
 
-            user = User.objects.filter(pk=user_id).only('id', 'role', 'email').first()
+            user = User.objects.filter(pk=user_id).only(
+                'id', 'role', 'email', 'is_active', 'active_session_key'
+            ).first()
             if user:
+                if not user.is_active:
+                    return Response(
+                        {'error': 'This account has been deactivated.'},
+                        status=status.HTTP_401_UNAUTHORIZED,
+                    )
+
+                # Reject the refresh if the session key in the token no longer
+                # matches the one stored in the database.  This prevents a
+                # device that was kicked out (because the user logged in
+                # elsewhere) from silently obtaining a new access token.
+                token_session_key = refresh.payload.get('session_key')
+                if token_session_key and user.active_session_key != token_session_key:
+                    return Response(
+                        {'error': 'Your session has been terminated. Please log in again.'},
+                        status=status.HTTP_401_UNAUTHORIZED,
+                    )
+
                 access['role'] = user.role
                 access['email'] = user.email or ''
+                if token_session_key:
+                    access['session_key'] = token_session_key
 
             data = {'access': str(access)}
 
@@ -416,3 +455,75 @@ class LogoutView(APIView):
             pass  # Already invalid — that's fine
 
         return Response(status=status.HTTP_205_RESET_CONTENT)
+
+
+# ─────────────────────────────────────────────
+# Change Password
+# ─────────────────────────────────────────────
+
+class ChangePasswordView(APIView):
+    """Allow an authenticated user to change their password."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=["Authentication"],
+        summary="Change password",
+        description="Change the authenticated user's password. Requires the current password for verification.",
+    )
+    def post(self, request):
+        current = request.data.get('current_password')
+        new = request.data.get('new_password')
+        confirm = request.data.get('confirm_password')
+
+        if not current or not new or not confirm:
+            return Response(
+                {'error': 'current_password, new_password, and confirm_password are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not request.user.check_password(current):
+            return Response({'error': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+        if new != confirm:
+            return Response({'error': 'Passwords do not match.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(new) < 8:
+            return Response({'error': 'Password must be at least 8 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        request.user.set_password(new)
+        request.user.save(update_fields=['password'])
+        return Response({'message': 'Password updated successfully.'})
+
+
+# ─────────────────────────────────────────────
+# Notification Preferences
+# ─────────────────────────────────────────────
+
+class NotificationsView(APIView):
+    """
+    GET  — retrieve the authenticated user's notification preferences.
+    PATCH — update one or more notification preferences.
+    All preferences default to True at registration (opted in).
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={200: NotificationPreferencesSerializer()},
+        tags=['User'],
+        summary='Get notification preferences',
+    )
+    def get(self, request):
+        serializer = NotificationPreferencesSerializer(request.user)
+        return Response(serializer.data)
+
+    @extend_schema(
+        request=NotificationPreferencesSerializer,
+        responses={200: NotificationPreferencesSerializer()},
+        tags=['User'],
+        summary='Update notification preferences',
+        description='Send only the fields you want to change. Unspecified fields are left untouched.',
+    )
+    def patch(self, request):
+        serializer = NotificationPreferencesSerializer(
+            request.user, data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)

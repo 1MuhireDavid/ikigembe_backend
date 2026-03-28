@@ -20,7 +20,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)
 
-    
+
     google_id = models.CharField(max_length=255, unique=True, null=True, blank=True, db_index=True)
     avatar_url = models.URLField(max_length=500, blank=True, null=True)
 
@@ -30,6 +30,15 @@ class User(AbstractBaseUser, PermissionsMixin):
         default=Role.VIEWER,
         db_index=True,
     )
+
+    # Single-session enforcement: stores the key of the only valid active session.
+    # A new login rotates this key, immediately invalidating tokens from other devices.
+    active_session_key = models.CharField(max_length=36, blank=True, null=True)
+
+    # Notification preferences — all opted in by default per acceptance criteria.
+    notify_new_trailers = models.BooleanField(default=True)
+    notify_new_movies = models.BooleanField(default=True)
+    notify_promotions = models.BooleanField(default=True)
 
     is_staff = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)

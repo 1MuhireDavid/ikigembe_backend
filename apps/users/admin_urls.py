@@ -10,6 +10,10 @@ from .admin_views import (
     AdminProducerApproveView,
     AdminProducerSuspendView,
     AdminCreateProducerView,
+    AdminWithdrawalsListView,
+    AdminWithdrawalApproveView,
+    AdminWithdrawalCompleteView,
+    AdminWithdrawalRejectView,
 )
 
 urlpatterns = [
@@ -26,7 +30,13 @@ urlpatterns = [
     
     # Producers
     path('producers/', AdminProducersListView.as_view(), name='admin-producers-list'),
+    path('producers/create/', AdminCreateProducerView.as_view(), name='admin-producer-create'),
     path('producers/<int:user_id>/approve/', AdminProducerApproveView.as_view(), name='admin-producer-approve'),
     path('producers/<int:user_id>/suspend/', AdminProducerSuspendView.as_view(), name='admin-producer-suspend'),
-    path('producers/create/', AdminCreateProducerView.as_view(), name='admin-producer-create'),
+
+    # Withdrawal Requests
+    path('withdrawals/', AdminWithdrawalsListView.as_view(), name='admin-withdrawals-list'),
+    path('withdrawals/<int:withdrawal_id>/approve/', AdminWithdrawalApproveView.as_view(), name='admin-withdrawal-approve'),
+    path('withdrawals/<int:withdrawal_id>/complete/', AdminWithdrawalCompleteView.as_view(), name='admin-withdrawal-complete'),
+    path('withdrawals/<int:withdrawal_id>/reject/', AdminWithdrawalRejectView.as_view(), name='admin-withdrawal-reject'),
 ]
