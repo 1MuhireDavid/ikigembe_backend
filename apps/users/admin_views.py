@@ -26,6 +26,7 @@ from apps.movies.models import Movie
 from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet
 from apps.payments.pawapay import initiate_payout
+from apps.payments.emails import send_withdrawal_status_email
 
 logger = logging.getLogger(__name__)
 
@@ -632,6 +633,7 @@ class AdminWithdrawalApproveView(AdminBaseView):
         withdrawal.status = 'Approved'
         withdrawal.processed_at = timezone.now()
         withdrawal.save(update_fields=['status', 'processed_at'])
+        send_withdrawal_status_email(withdrawal)
 
         return Response({
             'message': 'Withdrawal approved successfully.',
@@ -688,6 +690,7 @@ class AdminWithdrawalCompleteView(AdminBaseView):
             withdrawal.status = 'Completed'
             withdrawal.processed_at = timezone.now()
             withdrawal.save(update_fields=['status', 'processed_at'])
+            send_withdrawal_status_email(withdrawal)
             return Response({
                 'message': 'Withdrawal marked as completed.',
                 'id': withdrawal.id,
@@ -775,6 +778,7 @@ class AdminWithdrawalRejectView(AdminBaseView):
         withdrawal.status = 'Rejected'
         withdrawal.processed_at = timezone.now()
         withdrawal.save(update_fields=['status', 'processed_at'])
+        send_withdrawal_status_email(withdrawal)
 
         return Response({
             'message': 'Withdrawal rejected.',

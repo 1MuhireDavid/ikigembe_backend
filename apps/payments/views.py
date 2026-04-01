@@ -15,7 +15,7 @@ from django.utils import timezone
 from apps.movies.models import Movie
 from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.pawapay import initiate_deposit, detect_correspondent
-from apps.payments.emails import send_payment_completed_email
+from apps.payments.emails import send_payment_completed_email, send_withdrawal_status_email
 import requests
 
 logger = logging.getLogger(__name__)
@@ -275,6 +275,7 @@ class PawapayWebhookView(APIView):
             return Response(status=status.HTTP_200_OK)
 
         logger.info('Payout %s → Withdrawal #%s marked %s', payout_id, withdrawal.id, withdrawal.status)
+        send_withdrawal_status_email(withdrawal)
         return Response(status=status.HTTP_200_OK)
 
     def _handle_refund(self, refund_id, pawapay_status):
