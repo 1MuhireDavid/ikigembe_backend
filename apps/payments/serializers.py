@@ -23,7 +23,7 @@ def get_producer_wallet(producer):
 
     locked = WithdrawalRequest.objects.filter(
         producer=producer,
-        status__in=['Pending', 'Approved', 'Completed'],
+        status__in=['Pending', 'Approved', 'Processing', 'Completed'],
     ).aggregate(total=Coalesce(Sum('amount'), 0))['total']
 
     pending = WithdrawalRequest.objects.filter(

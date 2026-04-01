@@ -283,3 +283,17 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 FFMPEG_PATH = os.getenv('FFMPEG_PATH', 'ffmpeg')
 HLS_SEGMENT_DURATION = 6
 HLS_TEMP_DIR = BASE_DIR / 'tmp' / 'hls'
+
+# PawaPay
+PAWAPAY_API_KEY = os.getenv('PAWAPAY_API_KEY', '')
+PAWAPAY_BASE_URL = os.getenv('PAWAPAY_BASE_URL', 'https://api.sandbox.pawapay.cloud')
+
+# Email
+# Dev default: print emails to console. Set EMAIL_BACKEND in .env for production SMTP.
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'Ikigembe <noreply@ikigembe.com>')
