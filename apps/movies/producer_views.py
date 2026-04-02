@@ -10,7 +10,7 @@ from drf_spectacular.types import OpenApiTypes
 
 from apps.users.permissions import IsProducerRole
 from apps.movies.models import Movie
-from apps.movies.serializers import ProducerMovieListSerializer
+from apps.movies.serializers import ProducerMovieListSerializer, ProducerMovieDetailSerializer
 from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import WithdrawalRequestSerializer, get_producer_wallet
 
@@ -77,6 +77,29 @@ class ProducerMyMoviesView(ProducerBaseView):
             'total_results': total,
             'total_pages': (total + page_size - 1) // page_size,
         })
+
+
+class ProducerMovieDetailView(ProducerBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Get full details of one of my movies',
+        description=(
+            'Returns all metadata, file URLs, and HLS transcoding status for a movie '
+            'owned by the authenticated producer. Returns 404 if the movie does not belong to them.'
+        ),
+        responses={
+            200: ProducerMovieDetailSerializer,
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Producer role required'),
+            404: OpenApiResponse(description='Movie not found or not owned by this producer'),
+        },
+    )
+    def get(self, request, id):
+        try:
+            movie = Movie.objects.get(id=id, producer_profile=request.user)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(ProducerMovieDetailSerializer(movie).data)
 
 
 class ProducerWalletView(ProducerBaseView):

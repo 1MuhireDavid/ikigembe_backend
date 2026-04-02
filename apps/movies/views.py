@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.authentication import SessionAuthentication
-from apps.users.permissions import IsAdminRole
+from apps.users.permissions import IsAdminRole, IsAdminOrProducerRole
 from django.utils import timezone
 from django.conf import settings
 from drf_spectacular.utils import (
@@ -244,10 +244,20 @@ class MovieDetailView(APIView):
     )
     def get(self, request, id):
         try:
-            movie = Movie.objects.get(id=id, is_active=True)
-            return Response(MovieDetailSerializer(movie).data)
+            movie = Movie.objects.get(id=id)
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Producers can view their own inactive movies; everyone else needs is_active=True.
+        is_own_movie = (
+            request.user.is_authenticated
+            and request.user.role == 'Producer'
+            and movie.producer_profile_id == request.user.id
+        )
+        if not movie.is_active and not is_own_movie:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(MovieDetailSerializer(movie).data)
 
 
 # ─────────────────────────────────────────────
@@ -328,15 +338,21 @@ class MovieStreamView(APIView):
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Payment gate: verify the user has purchased this movie.
-        has_access = Payment.objects.filter(
-            user=request.user, movie=movie, status='Completed'
-        ).exists()
-        if not has_access:
-            return Response(
-                {'error': 'Purchase required to stream this movie.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        # Producers have free access to their own movies.
+        is_own_movie = (
+            request.user.role == 'Producer'
+            and movie.producer_profile_id == request.user.id
+        )
+        if not is_own_movie:
+            # Payment gate: verify the user has purchased this movie.
+            has_access = Payment.objects.filter(
+                user=request.user, movie=movie, status='Completed'
+            ).exists()
+            if not has_access:
+                return Response(
+                    {'error': 'Purchase required to stream this movie.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
 
         movie.increment_views()
         serializer = MovieVideoAccessSerializer(movie, context={'request': request})
@@ -480,10 +496,11 @@ class MovieImagesView(APIView):
 class MovieCreateView(APIView):
     """
     Create a new movie with file uploads.
-    Send as multipart/form-data. Requires admin auth.
+    Send as multipart/form-data. Admins and Producers are allowed.
+    Producers have their producer_profile set automatically to themselves.
     """
     parser_classes = [MultiPartParser, FormParser]
-    permission_classes = [IsAdminRole]
+    permission_classes = [IsAdminOrProducerRole]
 
     @extend_schema(
         tags=['Movies - Admin'],
@@ -494,7 +511,8 @@ class MovieCreateView(APIView):
             '**Required:** `title`, `overview`, `release_date`, `thumbnail`, `video_file`\n\n'
             '**Optional:** `backdrop`, `trailer_file`, `price`, `duration_minutes`, '
             '`trailer_duration_seconds`, `cast`, `genres`, `producer`, `is_active`, `has_free_preview`\n\n'
-            '`cast` and `genres` — send as a JSON array string, e.g. `["Action", "Drama"]`'
+            '`cast` and `genres` — send as a JSON array string, e.g. `["Action", "Drama"]`\n\n'
+            'Producers automatically become the `producer_profile` of the created movie.'
         ),
         request={
             'multipart/form-data': MovieCreateSerializer,
@@ -502,7 +520,7 @@ class MovieCreateView(APIView):
         responses={
             201: MovieDetailSerializer,
             400: OpenApiResponse(description='Validation error'),
-            403: OpenApiResponse(description='Admin access required'),
+            403: OpenApiResponse(description='Admin or Producer access required'),
         },
         examples=[
             OpenApiExample(
@@ -526,7 +544,11 @@ class MovieCreateView(APIView):
     def post(self, request):
         serializer = MovieCreateSerializer(data=request.data)
         if serializer.is_valid():
-            movie = serializer.save()
+            # Producers are always linked to themselves; admins can set producer_profile freely.
+            save_kwargs = {}
+            if request.user.role == 'Producer':
+                save_kwargs['producer_profile'] = request.user
+            movie = serializer.save(**save_kwargs)
             return Response(MovieDetailSerializer(movie).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -535,17 +557,18 @@ class MovieUpdateView(APIView):
     """
     Partially update an existing movie.
     All fields optional — send only what you want to change.
-    Requires admin auth.
+    Admins can update any movie; Producers can only update their own.
     """
     parser_classes = [MultiPartParser, FormParser]
-    permission_classes = [IsAdminRole]
+    permission_classes = [IsAdminOrProducerRole]
 
     @extend_schema(
         tags=['Movies - Admin'],
         summary='Update a movie (partial)',
         description=(
             'Partially update a movie. Send only the fields you want to change as **multipart/form-data**. '
-            'File fields replace the existing file when provided.'
+            'File fields replace the existing file when provided. '
+            'Producers can only update movies they own.'
         ),
         request={
             'multipart/form-data': MovieCreateSerializer,
@@ -553,7 +576,7 @@ class MovieUpdateView(APIView):
         responses={
             200: MovieDetailSerializer,
             400: OpenApiResponse(description='Validation error'),
-            403: OpenApiResponse(description='Admin access required'),
+            403: OpenApiResponse(description='Admin or Producer access required (Producers: own movies only)'),
             404: OpenApiResponse(description='Movie not found'),
         },
     )
@@ -562,6 +585,9 @@ class MovieUpdateView(APIView):
             movie = Movie.objects.get(id=id)
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == 'Producer' and movie.producer_profile_id != request.user.id:
+            return Response({'error': 'You can only update your own movies.'}, status=status.HTTP_403_FORBIDDEN)
 
         serializer = MovieCreateSerializer(movie, data=request.data, partial=True)
         if serializer.is_valid():
@@ -575,20 +601,21 @@ class MovieDeleteView(APIView):
     """
     Delete a movie record.
     Note: S3 media files are NOT deleted automatically.
-    Requires admin auth.
+    Admins can delete any movie; Producers can only delete their own.
     """
-    permission_classes = [IsAdminRole]
+    permission_classes = [IsAdminOrProducerRole]
 
     @extend_schema(
         tags=['Movies - Admin'],
         summary='Delete a movie',
         description=(
             'Permanently deletes a movie record from the database. '
-            '**Note:** media files stored in S3 are not removed automatically.'
+            '**Note:** media files stored in S3 are not removed automatically. '
+            'Producers can only delete their own movies.'
         ),
         responses={
             204: OpenApiResponse(description='Deleted successfully'),
-            403: OpenApiResponse(description='Admin access required'),
+            403: OpenApiResponse(description='Admin or Producer access required (Producers: own movies only)'),
             404: OpenApiResponse(description='Movie not found'),
         },
     )
@@ -598,12 +625,15 @@ class MovieDeleteView(APIView):
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        if request.user.role == 'Producer' and movie.producer_profile_id != request.user.id:
+            return Response({'error': 'You can only delete your own movies.'}, status=status.HTTP_403_FORBIDDEN)
+
         movie.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # ─────────────────────────────────────────────
-# S3 Multipart Upload — Admin only
+# S3 Multipart Upload — Admin and Producer
 # ─────────────────────────────────────────────
 
 def _s3_client():
@@ -618,7 +648,7 @@ def _s3_client():
 class InitiateMultipartUploadView(APIView):
     """Initiate an S3 multipart upload session for large video files."""
     authentication_classes = [SessionAuthentication]
-    permission_classes = [IsAdminRole]
+    permission_classes = [IsAdminOrProducerRole]
 
     @extend_schema(
         tags=['Movies - S3 Multipart Upload'],
@@ -689,7 +719,7 @@ class InitiateMultipartUploadView(APIView):
 class SignMultipartUploadPartView(APIView):
     """Generate a pre-signed URL for uploading a single part."""
     authentication_classes = [SessionAuthentication]
-    permission_classes = [IsAdminRole]
+    permission_classes = [IsAdminOrProducerRole]
 
     @extend_schema(
         tags=['Movies - S3 Multipart Upload'],
@@ -738,7 +768,7 @@ class SignMultipartUploadPartView(APIView):
 class CompleteMultipartUploadView(APIView):
     """Finalize a multipart upload after all parts have been uploaded."""
     authentication_classes = [SessionAuthentication]
-    permission_classes = [IsAdminRole]
+    permission_classes = [IsAdminOrProducerRole]
 
     @extend_schema(
         tags=['Movies - S3 Multipart Upload'],
@@ -804,7 +834,7 @@ class CompleteMultipartUploadView(APIView):
 class AbortMultipartUploadView(APIView):
     """Cancel an in-progress multipart upload and free S3 storage."""
     authentication_classes = [SessionAuthentication]
-    permission_classes = [IsAdminRole]
+    permission_classes = [IsAdminOrProducerRole]
 
     @extend_schema(
         tags=['Movies - S3 Multipart Upload'],
