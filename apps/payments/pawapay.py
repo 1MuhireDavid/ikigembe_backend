@@ -34,7 +34,13 @@ def _post(endpoint: str, payload: dict) -> dict:
         timeout=30,
     )
     response.raise_for_status()
-    return response.json()
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise requests.RequestException(
+            f'PawaPay returned non-JSON response (status {response.status_code}): '
+            f'{response.text[:200]}'
+        ) from exc
 
 
 def normalize_phone(phone: str) -> str:
