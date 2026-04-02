@@ -111,6 +111,7 @@ class ProducerMovieListSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'title',
+            'overview',
             'thumbnail_url',
             'price',
             'views',
@@ -119,12 +120,64 @@ class ProducerMovieListSerializer(serializers.ModelSerializer):
             'duration_minutes',
             'is_active',
             'has_free_preview',
+            'hls_status',
             'created_at',
             'genres',
         ]
 
     def get_thumbnail_url(self, obj):
         return obj.thumbnail.url if obj.thumbnail else None
+
+
+class ProducerMovieDetailSerializer(serializers.ModelSerializer):
+    """Full detail serializer for a producer viewing one of their own movies."""
+    thumbnail_url = serializers.SerializerMethodField()
+    backdrop_url = serializers.SerializerMethodField()
+    trailer_url = serializers.SerializerMethodField()
+    video_url = serializers.SerializerMethodField()
+    hls_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Movie
+        fields = [
+            'id',
+            'title',
+            'overview',
+            'thumbnail_url',
+            'backdrop_url',
+            'trailer_url',
+            'trailer_duration_seconds',
+            'video_url',
+            'hls_url',
+            'hls_status',
+            'price',
+            'views',
+            'rating',
+            'release_date',
+            'duration_minutes',
+            'has_free_preview',
+            'is_active',
+            'cast',
+            'genres',
+            'producer',
+            'created_at',
+            'updated_at',
+        ]
+
+    def get_thumbnail_url(self, obj):
+        return obj.thumbnail.url if obj.thumbnail else None
+
+    def get_backdrop_url(self, obj):
+        return obj.backdrop.url if obj.backdrop else None
+
+    def get_trailer_url(self, obj):
+        return obj.trailer_file.url if obj.trailer_file else None
+
+    def get_video_url(self, obj):
+        return obj.video_file.url if obj.video_file else None
+
+    def get_hls_url(self, obj):
+        return obj.hls_url
 
 
 class MovieVideoAccessSerializer(serializers.ModelSerializer):

@@ -244,10 +244,20 @@ class MovieDetailView(APIView):
     )
     def get(self, request, id):
         try:
-            movie = Movie.objects.get(id=id, is_active=True)
-            return Response(MovieDetailSerializer(movie).data)
+            movie = Movie.objects.get(id=id)
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Producers can view their own inactive movies; everyone else needs is_active=True.
+        is_own_movie = (
+            request.user.is_authenticated
+            and request.user.role == 'Producer'
+            and movie.producer_profile_id == request.user.id
+        )
+        if not movie.is_active and not is_own_movie:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(MovieDetailSerializer(movie).data)
 
 
 # ─────────────────────────────────────────────
@@ -328,15 +338,21 @@ class MovieStreamView(APIView):
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Payment gate: verify the user has purchased this movie.
-        has_access = Payment.objects.filter(
-            user=request.user, movie=movie, status='Completed'
-        ).exists()
-        if not has_access:
-            return Response(
-                {'error': 'Purchase required to stream this movie.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        # Producers have free access to their own movies.
+        is_own_movie = (
+            request.user.role == 'Producer'
+            and movie.producer_profile_id == request.user.id
+        )
+        if not is_own_movie:
+            # Payment gate: verify the user has purchased this movie.
+            has_access = Payment.objects.filter(
+                user=request.user, movie=movie, status='Completed'
+            ).exists()
+            if not has_access:
+                return Response(
+                    {'error': 'Purchase required to stream this movie.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
 
         movie.increment_views()
         serializer = MovieVideoAccessSerializer(movie, context={'request': request})
