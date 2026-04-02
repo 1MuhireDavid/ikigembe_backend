@@ -61,8 +61,7 @@ class MovieSerializer(serializers.ModelSerializer):
             return None
         return {
             'id': user.id,
-            'name': user.full_name or str(user),
-            'email': user.email,
+            'name': user.full_name or obj.producer or '',
         }
 
 
@@ -123,8 +122,7 @@ class MovieDetailSerializer(serializers.ModelSerializer):
             return None
         return {
             'id': user.id,
-            'name': user.full_name or str(user),
-            'email': user.email,
+            'name': user.full_name or obj.producer or '',
         }
 
 
