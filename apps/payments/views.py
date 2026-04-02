@@ -123,7 +123,7 @@ class InitiatePaymentView(APIView):
             payment.save(update_fields=['status'])
             logger.error(
                 'PawaPay HTTP error for deposit %s: %s — response: %s',
-                deposit_id, e, e.response.text if e.response is not None else 'no body',
+                deposit_id, e, e.response.text[:500] if e.response is not None else 'no body',
             )
             return Response(
                 {'error': 'Payment service error. Please try again.'},
