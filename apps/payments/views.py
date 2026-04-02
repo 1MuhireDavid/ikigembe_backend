@@ -193,6 +193,59 @@ class PaymentStatusView(APIView):
         })
 
 
+class PaymentHistoryView(APIView):
+    """Returns the authenticated viewer's own payment history."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=['Payments'],
+        summary='My payment history',
+        description='Returns all payments made by the authenticated user, newest first.',
+        responses={
+            200: inline_serializer(
+                name='PaymentHistoryResponse',
+                fields={
+                    'count': drf_serializers.IntegerField(),
+                    'results': drf_serializers.ListField(
+                        child=inline_serializer(
+                            name='PaymentHistoryItem',
+                            fields={
+                                'deposit_id': drf_serializers.CharField(),
+                                'movie_id': drf_serializers.IntegerField(allow_null=True),
+                                'movie_title': drf_serializers.CharField(allow_null=True),
+                                'amount': drf_serializers.IntegerField(),
+                                'currency': drf_serializers.CharField(),
+                                'status': drf_serializers.CharField(),
+                                'created_at': drf_serializers.DateTimeField(),
+                            }
+                        )
+                    ),
+                }
+            ),
+        }
+    )
+    def get(self, request):
+        payments = (
+            Payment.objects
+            .filter(user=request.user)
+            .select_related('movie')
+            .order_by('-created_at')
+        )
+        results = [
+            {
+                'deposit_id': p.deposit_id,
+                'movie_id': p.movie.id if p.movie else None,
+                'movie_title': p.movie.title if p.movie else None,
+                'amount': p.amount,
+                'currency': 'RWF',
+                'status': p.status,
+                'created_at': p.created_at,
+            }
+            for p in payments
+        ]
+        return Response({'count': len(results), 'results': results})
+
+
 class PawapayWebhookView(APIView):
     """
     Single webhook endpoint for all PawaPay callbacks: deposits, payouts, and refunds.

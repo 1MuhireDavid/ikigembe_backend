@@ -12,6 +12,7 @@ from .views import (
     MovieStreamView,
     MovieTrailerView,
     MovieTranscodeView,
+    MovieHlsStatusView,
     MovieCreateView,
     MovieUpdateView,
     MovieDeleteView,
@@ -22,9 +23,15 @@ from .views import (
     MyListView,
     ContinueWatchingView,
     WatchProgressView,
+    ProducerListView,
+    MoviesByProducerView,
 )
 
 urlpatterns = [
+    # ── Browse by Producer ─────────────────────────────────────────────
+    path('producers/', ProducerListView.as_view(), name='producer-list'),
+    path('producers/<int:producer_id>/', MoviesByProducerView.as_view(), name='movies-by-producer'),
+
     # ── Discovery & Lists ──────────────────────────────────────────────
     path('discover/', DiscoverMoviesView.as_view(), name='discover-movies'),
     path('search/', MovieSearchView.as_view(), name='movie-search'),
@@ -49,6 +56,7 @@ urlpatterns = [
     path('<int:id>/stream/', MovieStreamView.as_view(), name='movie-stream'),
     path('<int:id>/trailer/', MovieTrailerView.as_view(), name='movie-trailer'),
     path('<int:id>/transcode/', MovieTranscodeView.as_view(), name='movie-transcode'),
+    path('<int:id>/hls-status/', MovieHlsStatusView.as_view(), name='movie-hls-status'),
     path('<int:id>/progress/', WatchProgressView.as_view(), name='movie-progress'),
 
     # ── S3 Multipart Upload (admin) ────────────────────────────────────

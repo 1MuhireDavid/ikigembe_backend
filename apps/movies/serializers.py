@@ -209,6 +209,7 @@ class MovieVideoAccessSerializer(serializers.ModelSerializer):
 
     video_url = serializers.SerializerMethodField()
     trailer_url = serializers.SerializerMethodField()
+    subtitles_url = serializers.SerializerMethodField()
     access_granted = serializers.SerializerMethodField()
     hls_url = serializers.SerializerMethodField()
 
@@ -219,6 +220,7 @@ class MovieVideoAccessSerializer(serializers.ModelSerializer):
             'title',
             'video_url',
             'trailer_url',
+            'subtitles_url',
             'duration_minutes',
             'access_granted',
             'hls_status',
@@ -233,6 +235,9 @@ class MovieVideoAccessSerializer(serializers.ModelSerializer):
 
     def get_trailer_url(self, obj):
         return obj.trailer_file.url if obj.trailer_file else None
+
+    def get_subtitles_url(self, obj):
+        return obj.subtitles_file.url if obj.subtitles_file else None
 
     def get_access_granted(self, obj):
         """Return True if the requesting user has a completed payment for this movie."""
