@@ -716,14 +716,22 @@ class AdminWithdrawalCompleteView(AdminBaseView):
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except RequestsHTTPError as e:
+            withdrawal.payout_id = payout_id
             withdrawal.status = 'Failed'
-            withdrawal.save(update_fields=['status'])
+            withdrawal.processed_at = timezone.now()
+            withdrawal.save(update_fields=['payout_id', 'status', 'processed_at'])
+            send_withdrawal_status_email(withdrawal)
             logger.error('PawaPay payout error for withdrawal %s: %s', withdrawal_id, e)
             return Response(
                 {'error': 'Payout service error. Please try again.'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         except RequestsRequestException as e:
+            withdrawal.payout_id = payout_id
+            withdrawal.status = 'Failed'
+            withdrawal.processed_at = timezone.now()
+            withdrawal.save(update_fields=['payout_id', 'status', 'processed_at'])
+            send_withdrawal_status_email(withdrawal)
             logger.error('PawaPay payout connection error for withdrawal %s: %s', withdrawal_id, e)
             return Response(
                 {'error': 'Payout service error. Please try again.'},
@@ -732,6 +740,10 @@ class AdminWithdrawalCompleteView(AdminBaseView):
 
         pawapay_status = pawapay_response.get('status', '')
         if pawapay_status not in ('ACCEPTED', 'COMPLETED'):
+            withdrawal.status = 'Failed'
+            withdrawal.processed_at = timezone.now()
+            withdrawal.save(update_fields=['status', 'processed_at'])
+            send_withdrawal_status_email(withdrawal)
             return Response(
                 {'error': f'Payout rejected by provider: {pawapay_status}'},
                 status=status.HTTP_400_BAD_REQUEST,
