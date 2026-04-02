@@ -724,6 +724,8 @@ class AdminWithdrawalCompleteView(AdminBaseView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         except RequestsRequestException as e:
+            withdrawal.status = 'Failed'
+            withdrawal.save(update_fields=['status'])
             logger.error('PawaPay payout connection error for withdrawal %s: %s', withdrawal_id, e)
             return Response(
                 {'error': 'Payout service error. Please try again.'},
@@ -732,6 +734,8 @@ class AdminWithdrawalCompleteView(AdminBaseView):
 
         pawapay_status = pawapay_response.get('status', '')
         if pawapay_status not in ('ACCEPTED', 'COMPLETED'):
+            withdrawal.status = 'Failed'
+            withdrawal.save(update_fields=['status'])
             return Response(
                 {'error': f'Payout rejected by provider: {pawapay_status}'},
                 status=status.HTTP_400_BAD_REQUEST,
