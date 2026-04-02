@@ -11,6 +11,7 @@ class MovieSerializer(serializers.ModelSerializer):
     trailer_url = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
     subtitles_url = serializers.SerializerMethodField()
+    producer_profile = serializers.SerializerMethodField()
 
     class Meta:
         model = Movie
@@ -28,7 +29,9 @@ class MovieSerializer(serializers.ModelSerializer):
             'release_date',
             'views',
             'duration_minutes',
-            'has_free_preview'
+            'has_free_preview',
+            'producer',
+            'producer_profile',
         ]
 
     def get_thumbnail_url(self, obj):
@@ -51,6 +54,17 @@ class MovieSerializer(serializers.ModelSerializer):
         """Returns the URL for the subtitles file."""
         return obj.subtitles_file.url if obj.subtitles_file else None
 
+    def get_producer_profile(self, obj):
+        """Returns basic info about the linked producer user account."""
+        user = obj.producer_profile
+        if not user:
+            return None
+        return {
+            'id': user.id,
+            'name': user.full_name or str(user),
+            'email': user.email,
+        }
+
 
 class MovieDetailSerializer(serializers.ModelSerializer):
     """Detailed movie serializer - includes trailer info"""
@@ -60,6 +74,7 @@ class MovieDetailSerializer(serializers.ModelSerializer):
     trailer_url = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
     subtitles_url = serializers.SerializerMethodField()
+    producer_profile = serializers.SerializerMethodField()
 
     class Meta:
         model = Movie
@@ -83,7 +98,8 @@ class MovieDetailSerializer(serializers.ModelSerializer):
             'created_at',
             'cast',
             'genres',
-            'producer'
+            'producer',
+            'producer_profile',
         ]
 
     def get_thumbnail_url(self, obj):
@@ -100,6 +116,16 @@ class MovieDetailSerializer(serializers.ModelSerializer):
 
     def get_subtitles_url(self, obj):
         return obj.subtitles_file.url if obj.subtitles_file else None
+
+    def get_producer_profile(self, obj):
+        user = obj.producer_profile
+        if not user:
+            return None
+        return {
+            'id': user.id,
+            'name': user.full_name or str(user),
+            'email': user.email,
+        }
 
 
 class ProducerMovieListSerializer(serializers.ModelSerializer):
