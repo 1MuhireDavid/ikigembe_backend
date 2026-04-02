@@ -1,4 +1,6 @@
+import uuid
 import secrets
+import logging
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -16,12 +18,18 @@ from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from requests import HTTPError as RequestsHTTPError
+from requests import RequestException as RequestsRequestException
 
 from apps.users.permissions import IsAdminRole
 from apps.users.serializers import AdminCreateProducerSerializer
 from apps.movies.models import Movie
 from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet
+from apps.payments.pawapay import initiate_payout
+from apps.payments.emails import send_withdrawal_status_email
+
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -368,7 +376,7 @@ class AdminProducersListView(AdminBaseView):
             row['producer_id']: row['total']
             for row in WithdrawalRequest.objects.filter(
                 producer_id__in=producer_ids,
-                status__in=['Pending', 'Approved', 'Completed'],
+                status__in=['Pending', 'Approved', 'Processing', 'Completed'],
             ).values('producer_id').annotate(total=Sum('amount'))
         }
 
@@ -626,6 +634,7 @@ class AdminWithdrawalApproveView(AdminBaseView):
         withdrawal.status = 'Approved'
         withdrawal.processed_at = timezone.now()
         withdrawal.save(update_fields=['status', 'processed_at'])
+        send_withdrawal_status_email(withdrawal)
 
         return Response({
             'message': 'Withdrawal approved successfully.',
@@ -638,11 +647,12 @@ class AdminWithdrawalApproveView(AdminBaseView):
 class AdminWithdrawalCompleteView(AdminBaseView):
     @extend_schema(
         tags=[_TAG],
-        summary='Mark a withdrawal as completed',
+        summary='Complete a withdrawal request',
         description=(
-            'Moves the withdrawal from **Approved → Completed**. '
-            'Use this after the bank/MoMo transfer has been confirmed. '
-            'Completed records are immutable.'
+            'For **MoMo** withdrawals: initiates a PawaPay payout to the producer\'s phone. '
+            'Status moves to **Processing** and will be updated to Completed or Failed via webhook. '
+            'For **Bank** withdrawals: marks directly as **Completed** (manual transfer assumed). '
+            'Only Approved requests can be completed. Completed records are immutable.'
         ),
         request=None,
         responses={
@@ -658,6 +668,7 @@ class AdminWithdrawalCompleteView(AdminBaseView):
             401: OpenApiResponse(description='Authentication credentials not provided'),
             403: OpenApiResponse(description='Admin role required'),
             404: OpenApiResponse(description='Withdrawal not found'),
+            502: OpenApiResponse(description='PawaPay payout API error'),
         },
     )
     def post(self, request, withdrawal_id):
@@ -675,12 +686,64 @@ class AdminWithdrawalCompleteView(AdminBaseView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        withdrawal.status = 'Completed'
+        # Bank withdrawals: mark complete immediately (manual transfer)
+        if withdrawal.payment_method == 'Bank':
+            withdrawal.status = 'Completed'
+            withdrawal.processed_at = timezone.now()
+            withdrawal.save(update_fields=['status', 'processed_at'])
+            send_withdrawal_status_email(withdrawal)
+            return Response({
+                'message': 'Withdrawal marked as completed.',
+                'id': withdrawal.id,
+                'status': withdrawal.status,
+            })
+
+        # MoMo withdrawals: send payout via PawaPay
+        if not withdrawal.momo_number:
+            return Response(
+                {'error': 'No MoMo number on record for this withdrawal.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        payout_id = str(uuid.uuid4())
+        try:
+            pawapay_response = initiate_payout(
+                payout_id=payout_id,
+                amount=withdrawal.amount,
+                phone_number=withdrawal.momo_number,
+                description='Ikigembe Earnings',
+            )
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except RequestsHTTPError as e:
+            withdrawal.status = 'Failed'
+            withdrawal.save(update_fields=['status'])
+            logger.error('PawaPay payout error for withdrawal %s: %s', withdrawal_id, e)
+            return Response(
+                {'error': 'Payout service error. Please try again.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except RequestsRequestException as e:
+            logger.error('PawaPay payout connection error for withdrawal %s: %s', withdrawal_id, e)
+            return Response(
+                {'error': 'Payout service error. Please try again.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        pawapay_status = pawapay_response.get('status', '')
+        if pawapay_status not in ('ACCEPTED', 'COMPLETED'):
+            return Response(
+                {'error': f'Payout rejected by provider: {pawapay_status}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        withdrawal.payout_id = payout_id
+        withdrawal.status = 'Processing'
         withdrawal.processed_at = timezone.now()
-        withdrawal.save(update_fields=['status', 'processed_at'])
+        withdrawal.save(update_fields=['payout_id', 'status', 'processed_at'])
 
         return Response({
-            'message': 'Withdrawal marked as completed.',
+            'message': 'MoMo payout initiated. Status will update to Completed once confirmed by PawaPay.',
             'id': withdrawal.id,
             'status': withdrawal.status,
         })
@@ -722,6 +785,7 @@ class AdminWithdrawalRejectView(AdminBaseView):
         withdrawal.status = 'Rejected'
         withdrawal.processed_at = timezone.now()
         withdrawal.save(update_fields=['status', 'processed_at'])
+        send_withdrawal_status_email(withdrawal)
 
         return Response({
             'message': 'Withdrawal rejected.',

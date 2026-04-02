@@ -19,6 +19,7 @@ from .serializers import (
     UserSerializer,
     RefreshSerializer
 )
+from .emails import send_welcome_email
 
 User = get_user_model()
 
@@ -175,6 +176,7 @@ class RegisterView(APIView):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
+        send_welcome_email(user)
         return Response(_token_response(user), status=status.HTTP_201_CREATED)
 
 
@@ -329,6 +331,7 @@ class GoogleAuthView(APIView):
                     google_id=google_id,
                     avatar_url=avatar_url,
                 )
+                send_welcome_email(user)
 
         return Response(_token_response(user), status=status.HTTP_200_OK)
 

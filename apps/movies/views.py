@@ -6,6 +6,8 @@ from rest_framework.authentication import SessionAuthentication
 from apps.users.permissions import IsAdminRole
 from django.utils import timezone
 from django.conf import settings
+from django.db.models import Q, TextField
+from django.db.models.functions import Cast
 from drf_spectacular.utils import (
     extend_schema,
     OpenApiParameter,
@@ -17,6 +19,7 @@ from drf_spectacular.types import OpenApiTypes
 from rest_framework import serializers as drf_serializers
 from rest_framework.permissions import IsAuthenticated
 from apps.payments.models import Payment
+from .emails import send_new_movie_email
 from .models import Movie, WatchProgress
 from .serializers import (
     MovieSerializer,
@@ -55,7 +58,10 @@ _PAGINATED_RESPONSE = inline_serializer(
 
 def _paginate(queryset, request):
     """Helper: paginate a queryset and return (page, page_size, slice)."""
-    page = int(request.GET.get('page', 1))
+    try:
+        page = max(1, int(request.GET.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
     page_size = 20
     start = (page - 1) * page_size
     total = queryset.count()
@@ -107,6 +113,53 @@ class DiscoverMoviesView(APIView):
         return Response({
             'page': page,
             'results': serializer.data,
+            'total_results': total,
+            'total_pages': (total + 19) // 20,
+        })
+
+
+class MovieSearchView(APIView):
+    """Search movies by title, overview, genre, or cast."""
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='q',
+                description='Search term — matches title, overview, genres, or cast',
+                required=True,
+                type=OpenApiTypes.STR,
+                location='query',
+            ),
+            _PAGE_PARAM,
+        ],
+        tags=['Movies'],
+        summary='Search movies',
+        description='Search active movies by title, overview, genre, or cast member. Results are ordered by popularity.',
+        responses={
+            200: _PAGINATED_RESPONSE,
+            400: OpenApiResponse(description='Missing or blank search term'),
+        },
+    )
+    def get(self, request):
+        q = request.GET.get('q', '').strip()
+        if not q:
+            return Response({'error': 'Search term "q" is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        movies = Movie.objects.annotate(
+            genres_text=Cast('genres', output_field=TextField()),
+            cast_text=Cast('cast', output_field=TextField()),
+        ).filter(
+            Q(title__icontains=q) |
+            Q(overview__icontains=q) |
+            Q(genres_text__icontains=q) |
+            Q(cast_text__icontains=q),
+            is_active=True,
+        ).order_by('-views')
+
+        page, total, movies_page = _paginate(movies, request)
+        return Response({
+            'page': page,
+            'results': MovieSerializer(movies_page, many=True).data,
             'total_results': total,
             'total_pages': (total + 19) // 20,
         })
@@ -543,6 +596,7 @@ class MovieCreateView(APIView):
         serializer = MovieCreateSerializer(data=request.data)
         if serializer.is_valid():
             movie = serializer.save()
+            send_new_movie_email(movie)
             return Response(MovieDetailSerializer(movie).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

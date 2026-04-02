@@ -15,7 +15,9 @@ class Payment(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='payments')
     movie = models.ForeignKey('movies.Movie', on_delete=models.SET_NULL, null=True, related_name='payments')
     amount = models.PositiveIntegerField(help_text="Amount in RWF")
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Completed')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
+    deposit_id = models.CharField(max_length=100, unique=True, null=True, blank=True, help_text="PawaPay deposit ID")
+    phone_number = models.CharField(max_length=20, null=True, blank=True, help_text="Payer's phone number")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -34,8 +36,10 @@ class WithdrawalRequest(models.Model):
     STATUS_CHOICES = (
         ('Pending', 'Pending'),
         ('Approved', 'Approved'),
+        ('Processing', 'Processing'),
         ('Rejected', 'Rejected'),
         ('Completed', 'Completed'),
+        ('Failed', 'Failed'),
     )
     PAYMENT_METHOD_CHOICES = (
         ('Bank', 'Bank'),
@@ -49,6 +53,7 @@ class WithdrawalRequest(models.Model):
     producer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='withdrawal_requests', limit_choices_to={'role': 'Producer'})
     amount = models.PositiveIntegerField(help_text="Amount to withdraw in RWF")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
+    payout_id = models.CharField(max_length=100, unique=True, null=True, blank=True, help_text="PawaPay payout ID (MoMo withdrawals only)")
     created_at = models.DateTimeField(auto_now_add=True)
     processed_at = models.DateTimeField(null=True, blank=True)
 

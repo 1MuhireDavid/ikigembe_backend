@@ -199,7 +199,7 @@ class ProducerWithdrawalsView(ProducerBaseView):
         with transaction.atomic():
             locked = WithdrawalRequest.objects.select_for_update().filter(
                 producer=request.user,
-                status__in=['Pending', 'Approved', 'Completed'],
+                status__in=['Pending', 'Approved', 'Processing', 'Completed'],
             ).aggregate(total=Coalesce(Sum('amount'), 0))['total']
 
             raw_revenue = Payment.objects.filter(

@@ -38,5 +38,7 @@ urlpatterns = [
     path('api/admin/dashboard/', include('apps.users.admin_urls')),
     # Producer Dashboard
     path('api/producer/dashboard/', include('apps.movies.producer_urls')),
+    # Payments
+    path('api/payments/', include('apps.payments.urls')),
 ]
 
