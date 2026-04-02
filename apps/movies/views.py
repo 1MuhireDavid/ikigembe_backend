@@ -19,7 +19,8 @@ from drf_spectacular.types import OpenApiTypes
 from rest_framework import serializers as drf_serializers
 from rest_framework.permissions import IsAuthenticated
 from apps.payments.models import Payment
-from .emails import send_new_movie_email
+from .emails import send_new_movie_email, send_new_trailer_email
+from .cloudfront_signing import sign_hls_url
 from .models import Movie, WatchProgress
 from .serializers import (
     MovieSerializer,
@@ -409,13 +410,15 @@ class MovieStreamView(APIView):
 
         movie.increment_views()
         serializer = MovieVideoAccessSerializer(movie, context={'request': request})
+        subtitles_url = movie.subtitles_file.url if movie.subtitles_file else None
         if movie.hls_status == 'ready' and movie.hls_url:
             return Response({
                 'movie': serializer.data,
-                'stream_url': movie.hls_url,
+                'stream_url': sign_hls_url(movie.hls_url),
                 'stream_type': 'hls',
                 'hls_status': movie.hls_status,
                 'fallback_url': movie.video_url,
+                'subtitles_url': subtitles_url,
             })
         return Response({
             'movie': serializer.data,
@@ -423,6 +426,7 @@ class MovieStreamView(APIView):
             'stream_type': 'mp4',
             'hls_status': movie.hls_status,
             'fallback_url': None,
+            'subtitles_url': subtitles_url,
         })
 
 
@@ -470,6 +474,7 @@ class MovieTranscodeView(APIView):
 
 class MovieHlsStatusView(APIView):
     """Lightweight polling endpoint for HLS transcoding progress."""
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(
         tags=['Movies - Media'],
@@ -477,7 +482,8 @@ class MovieHlsStatusView(APIView):
         description=(
             'Returns the current HLS transcoding status for a movie. '
             'Poll this endpoint after upload until `hls_status` is `ready` or `failed`. '
-            'No authentication required.'
+            'Authentication required. The streaming URL is only issued by the '
+            'payment-gated `stream/` endpoint.'
         ),
         responses={
             200: inline_serializer(
@@ -485,21 +491,20 @@ class MovieHlsStatusView(APIView):
                 fields={
                     'id': drf_serializers.IntegerField(),
                     'hls_status': drf_serializers.ChoiceField(choices=['not_started', 'processing', 'ready', 'failed']),
-                    'hls_url': drf_serializers.URLField(allow_null=True),
                 },
             ),
+            401: OpenApiResponse(description='Authentication required'),
             404: OpenApiResponse(description='Movie not found'),
         },
     )
     def get(self, request, id):
         try:
-            movie = Movie.objects.only('id', 'hls_status', 'hls_master_key').get(id=id)
+            movie = Movie.objects.only('id', 'hls_status').get(id=id)
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
         return Response({
             'id': movie.id,
             'hls_status': movie.hls_status,
-            'hls_url': movie.hls_url,
         })
 
 
@@ -632,6 +637,8 @@ class MovieCreateView(APIView):
         if serializer.is_valid():
             movie = serializer.save()
             send_new_movie_email(movie)
+            if movie.trailer_file:
+                send_new_trailer_email(movie)
             if movie.video_file:
                 from .transcoding import start_hls_transcode
                 start_hls_transcode(movie.id)
@@ -671,14 +678,16 @@ class MovieUpdateView(APIView):
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        had_trailer_before = bool(movie.trailer_file)
         serializer = MovieCreateSerializer(movie, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
             movie.refresh_from_db()
-            if 'video_file' in request.data:
+            if 'trailer_file' in request.data and movie.trailer_file and not had_trailer_before:
+                send_new_trailer_email(movie)
+            if 'video_file' in request.data and movie.video_file:
                 from .transcoding import start_hls_transcode
-                Movie.objects.filter(id=movie.id).update(hls_status='not_started')
-                start_hls_transcode(movie.id)
+                start_hls_transcode(movie.id, force=True)
             return Response(MovieDetailSerializer(movie).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1119,3 +1128,115 @@ class WatchProgressView(APIView):
         )
         serializer = WatchProgressSerializer(wp)
         return Response(serializer.data)
+
+
+# ─────────────────────────────────────────────
+# Browse by Producer
+# ─────────────────────────────────────────────
+
+class ProducerListView(APIView):
+    """
+    List all producers that have at least one active movie,
+    along with their movie count.
+
+    GET /api/movies/producers/
+    """
+
+    @extend_schema(
+        tags=['Movies - Producers'],
+        summary='List producers',
+        description=(
+            'Returns every producer who has at least one active movie on the platform, '
+            'along with their total movie count. Use this to build a "Browse by Producer" section.'
+        ),
+        responses={
+            200: inline_serializer(
+                name='ProducerListResponse',
+                fields={
+                    'count': drf_serializers.IntegerField(),
+                    'results': drf_serializers.ListField(
+                        child=inline_serializer(
+                            name='ProducerListItem',
+                            fields={
+                                'id': drf_serializers.IntegerField(),
+                                'name': drf_serializers.CharField(),
+                                'movie_count': drf_serializers.IntegerField(),
+                            }
+                        )
+                    ),
+                }
+            ),
+        },
+    )
+    def get(self, request):
+        from django.contrib.auth import get_user_model
+        from django.db.models import Count
+
+        User = get_user_model()
+
+        producers = (
+            User.objects.filter(
+                role='Producer',
+                is_active=True,
+                uploaded_movies__is_active=True,
+            )
+            .annotate(movie_count=Count('uploaded_movies', filter=Q(uploaded_movies__is_active=True)))
+            .filter(movie_count__gt=0)
+            .order_by('first_name', 'last_name')
+        )
+
+        results = [
+            {
+                'id': p.id,
+                'name': p.full_name or p.email or f'Producer #{p.id}',
+                'movie_count': p.movie_count,
+            }
+            for p in producers
+        ]
+        return Response({'count': len(results), 'results': results})
+
+
+class MoviesByProducerView(APIView):
+    """
+    Get all active movies uploaded by a specific producer.
+
+    GET /api/movies/producers/<producer_id>/
+    """
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter('producer_id', OpenApiTypes.INT, location='path', description='Producer user ID'),
+            _PAGE_PARAM,
+        ],
+        tags=['Movies - Producers'],
+        summary='Movies by producer',
+        description='Returns all active movies uploaded by the given producer, newest first.',
+        responses={
+            200: _PAGINATED_RESPONSE,
+            404: OpenApiResponse(description='Producer not found'),
+        },
+    )
+    def get(self, request, producer_id):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+
+        try:
+            producer = User.objects.get(id=producer_id, role='Producer', is_active=True)
+        except User.DoesNotExist:
+            return Response({'error': 'Producer not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        movies = Movie.objects.filter(
+            producer_profile=producer, is_active=True
+        ).order_by('-created_at')
+
+        page, total, movies_page = _paginate(movies, request)
+        return Response({
+            'producer': {
+                'id': producer.id,
+                'name': producer.full_name or producer.email or f'Producer #{producer.id}',
+            },
+            'page': page,
+            'results': MovieSerializer(movies_page, many=True).data,
+            'total_results': total,
+            'total_pages': (total + 19) // 20,
+        })

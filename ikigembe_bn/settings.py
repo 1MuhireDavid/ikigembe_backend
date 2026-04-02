@@ -279,6 +279,10 @@ X_FRAME_OPTIONS = 'SAMEORIGIN'
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# CloudFront signed URLs (HLS streaming)
+CLOUDFRONT_KEY_PAIR_ID = os.getenv('CLOUDFRONT_KEY_PAIR_ID', '')
+CLOUDFRONT_PRIVATE_KEY = os.getenv('CLOUDFRONT_PRIVATE_KEY', '')  # PEM string
+
 # HLS Adaptive Bitrate Streaming
 FFMPEG_PATH = os.getenv('FFMPEG_PATH', 'ffmpeg')
 HLS_SEGMENT_DURATION = 6

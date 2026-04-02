@@ -36,18 +36,25 @@ def check_ffmpeg():
         ) from e
 
 
-def start_hls_transcode(movie_id: int):
+def start_hls_transcode(movie_id: int, force: bool = False):
     """
     Atomically set hls_status to 'processing' and start a background thread.
     Safe to call from multiple requests — uses an atomic filter to prevent double-triggering.
+
+    force=True also pre-empts an in-progress transcode (used when a new video
+    file replaces the old one). The status transition is still atomic, so only
+    one thread can win the update race.
     """
     from apps.movies.models import Movie
+    allowed_statuses = ['not_started', 'failed']
+    if force:
+        allowed_statuses.append('processing')
     updated = Movie.objects.filter(
         id=movie_id,
-        hls_status__in=['not_started', 'failed'],
+        hls_status__in=allowed_statuses,
     ).update(hls_status='processing', hls_started_at=timezone.now())
     if not updated:
-        # Already processing or movie not found
+        # Already processing (non-force path) or movie not found
         return
     t = threading.Thread(target=_transcode_worker, args=(movie_id,), daemon=True)
     t.start()

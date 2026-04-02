@@ -23,9 +23,15 @@ from .views import (
     MyListView,
     ContinueWatchingView,
     WatchProgressView,
+    ProducerListView,
+    MoviesByProducerView,
 )
 
 urlpatterns = [
+    # ── Browse by Producer ─────────────────────────────────────────────
+    path('producers/', ProducerListView.as_view(), name='producer-list'),
+    path('producers/<int:producer_id>/', MoviesByProducerView.as_view(), name='movies-by-producer'),
+
     # ── Discovery & Lists ──────────────────────────────────────────────
     path('discover/', DiscoverMoviesView.as_view(), name='discover-movies'),
     path('search/', MovieSearchView.as_view(), name='movie-search'),

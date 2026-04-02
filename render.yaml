@@ -2,7 +2,7 @@ services:
   - type: web
     name: ikigembe-backend
     runtime: python
-    buildCommand: apt-get install -y ffmpeg && pip install -r requirements.txt
+    buildCommand: apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/* && pip install -r requirements.txt
     startCommand: python manage.py migrate && gunicorn ikigembe_bn.wsgi:application
     envVars:
       - key: DATABASE_URL
