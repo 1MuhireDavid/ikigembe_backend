@@ -12,6 +12,7 @@ from .views import (
     MovieStreamView,
     MovieTrailerView,
     MovieTranscodeView,
+    MovieHlsStatusView,
     MovieCreateView,
     MovieUpdateView,
     MovieDeleteView,
@@ -49,6 +50,7 @@ urlpatterns = [
     path('<int:id>/stream/', MovieStreamView.as_view(), name='movie-stream'),
     path('<int:id>/trailer/', MovieTrailerView.as_view(), name='movie-trailer'),
     path('<int:id>/transcode/', MovieTranscodeView.as_view(), name='movie-transcode'),
+    path('<int:id>/hls-status/', MovieHlsStatusView.as_view(), name='movie-hls-status'),
     path('<int:id>/progress/', WatchProgressView.as_view(), name='movie-progress'),
 
     # ── S3 Multipart Upload (admin) ────────────────────────────────────

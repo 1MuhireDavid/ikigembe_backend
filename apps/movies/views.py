@@ -468,6 +468,41 @@ class MovieTranscodeView(APIView):
         )
 
 
+class MovieHlsStatusView(APIView):
+    """Lightweight polling endpoint for HLS transcoding progress."""
+
+    @extend_schema(
+        tags=['Movies - Media'],
+        summary='Get HLS transcoding status',
+        description=(
+            'Returns the current HLS transcoding status for a movie. '
+            'Poll this endpoint after upload until `hls_status` is `ready` or `failed`. '
+            'No authentication required.'
+        ),
+        responses={
+            200: inline_serializer(
+                name='HlsStatusResponse',
+                fields={
+                    'id': drf_serializers.IntegerField(),
+                    'hls_status': drf_serializers.ChoiceField(choices=['not_started', 'processing', 'ready', 'failed']),
+                    'hls_url': drf_serializers.URLField(allow_null=True),
+                },
+            ),
+            404: OpenApiResponse(description='Movie not found'),
+        },
+    )
+    def get(self, request, id):
+        try:
+            movie = Movie.objects.only('id', 'hls_status', 'hls_master_key').get(id=id)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'id': movie.id,
+            'hls_status': movie.hls_status,
+            'hls_url': movie.hls_url,
+        })
+
+
 class MovieTrailerView(APIView):
     """Get free trailer streaming URL"""
 
@@ -597,6 +632,9 @@ class MovieCreateView(APIView):
         if serializer.is_valid():
             movie = serializer.save()
             send_new_movie_email(movie)
+            if movie.video_file:
+                from .transcoding import start_hls_transcode
+                start_hls_transcode(movie.id)
             return Response(MovieDetailSerializer(movie).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -637,6 +675,10 @@ class MovieUpdateView(APIView):
         if serializer.is_valid():
             serializer.save()
             movie.refresh_from_db()
+            if 'video_file' in request.data:
+                from .transcoding import start_hls_transcode
+                Movie.objects.filter(id=movie.id).update(hls_status='not_started')
+                start_hls_transcode(movie.id)
             return Response(MovieDetailSerializer(movie).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
