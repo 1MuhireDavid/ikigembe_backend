@@ -19,6 +19,7 @@ from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from requests import HTTPError as RequestsHTTPError
+from requests import RequestException as RequestsRequestException
 
 from apps.users.permissions import IsAdminRole
 from apps.users.serializers import AdminCreateProducerSerializer
@@ -718,6 +719,12 @@ class AdminWithdrawalCompleteView(AdminBaseView):
             withdrawal.status = 'Failed'
             withdrawal.save(update_fields=['status'])
             logger.error('PawaPay payout error for withdrawal %s: %s', withdrawal_id, e)
+            return Response(
+                {'error': 'Payout service error. Please try again.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except RequestsRequestException as e:
+            logger.error('PawaPay payout connection error for withdrawal %s: %s', withdrawal_id, e)
             return Response(
                 {'error': 'Payout service error. Please try again.'},
                 status=status.HTTP_502_BAD_GATEWAY,

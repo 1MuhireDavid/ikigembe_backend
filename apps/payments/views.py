@@ -1,6 +1,8 @@
 import uuid
 import logging
+import secrets
 
+from django.conf import settings
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
@@ -76,14 +78,19 @@ class InitiatePaymentView(APIView):
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Prevent duplicate purchases
-        already_purchased = Payment.objects.filter(
-            user=request.user, movie=movie, status='Completed'
-        ).exists()
-        if already_purchased:
+        # Prevent duplicate purchases and double-prompts for the same attempt
+        existing = Payment.objects.filter(
+            user=request.user, movie=movie, status__in=['Completed', 'Pending']
+        ).values_list('status', flat=True).first()
+        if existing == 'Completed':
             return Response(
                 {'error': 'You have already purchased this movie.'},
                 status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+        if existing == 'Pending':
+            return Response(
+                {'error': 'A payment for this movie is already in progress. Please approve the MoMo prompt or wait for it to expire.'},
+                status=status.HTTP_409_CONFLICT,
             )
 
         deposit_id = str(uuid.uuid4())
@@ -111,7 +118,7 @@ class InitiatePaymentView(APIView):
             payment.status = 'Failed'
             payment.save(update_fields=['status'])
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except requests.HTTPError as e:
+        except requests.RequestException as e:
             payment.status = 'Failed'
             payment.save(update_fields=['status'])
             logger.error('PawaPay API error for deposit %s: %s', deposit_id, e)
@@ -212,6 +219,12 @@ class PawapayWebhookView(APIView):
         responses={200: OpenApiResponse(description='Acknowledged')}
     )
     def post(self, request):
+        auth_header = request.headers.get('Authorization', '')
+        expected = f'Bearer {settings.PAWAPAY_API_KEY}'
+        if not settings.PAWAPAY_API_KEY or not secrets.compare_digest(auth_header, expected):
+            logger.warning('PawaPay webhook: invalid or missing Authorization header')
+            return Response(status=status.HTTP_200_OK)
+
         data = request.data
         pawapay_status = data.get('status', '').upper()
 

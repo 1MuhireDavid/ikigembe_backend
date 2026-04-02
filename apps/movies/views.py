@@ -6,7 +6,8 @@ from rest_framework.authentication import SessionAuthentication
 from apps.users.permissions import IsAdminRole
 from django.utils import timezone
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Q, TextField
+from django.db.models.functions import Cast
 from drf_spectacular.utils import (
     extend_schema,
     OpenApiParameter,
@@ -144,11 +145,14 @@ class MovieSearchView(APIView):
         if not q:
             return Response({'error': 'Search term "q" is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        movies = Movie.objects.filter(
+        movies = Movie.objects.annotate(
+            genres_text=Cast('genres', output_field=TextField()),
+            cast_text=Cast('cast', output_field=TextField()),
+        ).filter(
             Q(title__icontains=q) |
             Q(overview__icontains=q) |
-            Q(genres__icontains=q) |
-            Q(cast__icontains=q),
+            Q(genres_text__icontains=q) |
+            Q(cast_text__icontains=q),
             is_active=True,
         ).order_by('-views')
 
