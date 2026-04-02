@@ -11,8 +11,8 @@ LIVE_URL = 'https://api.pawapay.cloud'
 _CORRESPONDENT_MAP = {
     '78': 'MTN_MOMO_RWA',
     '79': 'MTN_MOMO_RWA',
-    '72': 'AIRTEL_OAPI_RWA',
-    '73': 'AIRTEL_OAPI_RWA',
+    '72': 'AIRTEL_RWA',
+    '73': 'AIRTEL_RWA',
 }
 
 

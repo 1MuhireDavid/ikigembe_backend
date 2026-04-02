@@ -118,10 +118,21 @@ class InitiatePaymentView(APIView):
             payment.status = 'Failed'
             payment.save(update_fields=['status'])
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except requests.HTTPError as e:
+            payment.status = 'Failed'
+            payment.save(update_fields=['status'])
+            logger.error(
+                'PawaPay HTTP error for deposit %s: %s — response: %s',
+                deposit_id, e, e.response.text if e.response is not None else 'no body',
+            )
+            return Response(
+                {'error': 'Payment service error. Please try again.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         except requests.RequestException as e:
             payment.status = 'Failed'
             payment.save(update_fields=['status'])
-            logger.error('PawaPay API error for deposit %s: %s', deposit_id, e)
+            logger.error('PawaPay connection error for deposit %s: %s', deposit_id, e)
             return Response(
                 {'error': 'Payment service error. Please try again.'},
                 status=status.HTTP_502_BAD_GATEWAY,
