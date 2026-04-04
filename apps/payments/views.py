@@ -283,10 +283,9 @@ class PawapayWebhookView(APIView):
         responses={200: OpenApiResponse(description='Acknowledged')}
     )
     def post(self, request):
-        # Only verify the Authorization header if PAWAPAY_CALLBACK_TOKEN is explicitly set.
-        # If no callback token is configured in the PawaPay dashboard, PawaPay sends
-        # webhooks with no Authorization header — skip the check in that case.
-        callback_token = getattr(settings, 'PAWAPAY_CALLBACK_TOKEN', '')
+        # In sandbox, PawaPay uses the API key as the callback Authorization token.
+        # For production you can set a dedicated PAWAPAY_CALLBACK_TOKEN env var instead.
+        callback_token = settings.PAWAPAY_CALLBACK_TOKEN or settings.PAWAPAY_API_KEY
 
         if callback_token:
             auth_header = request.headers.get('Authorization', '')
@@ -295,10 +294,12 @@ class PawapayWebhookView(APIView):
                 masked = auth_header[:12] + '…' if len(auth_header) > 12 else repr(auth_header)
                 logger.warning(
                     'PawaPay webhook: Authorization mismatch — received %s. '
-                    'Check PAWAPAY_CALLBACK_TOKEN matches the PawaPay dashboard callback token.',
+                    'Ensure PAWAPAY_API_KEY on Render matches the API key in the PawaPay dashboard.',
                     masked,
                 )
                 return Response(status=status.HTTP_200_OK)
+        else:
+            logger.warning('PawaPay webhook: no token configured — processing without auth.')
 
         data = request.data
         pawapay_status = data.get('status', '').upper()
