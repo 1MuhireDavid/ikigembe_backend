@@ -291,6 +291,10 @@ HLS_TEMP_DIR = BASE_DIR / 'tmp' / 'hls'
 # PawaPay
 PAWAPAY_API_KEY = os.getenv('PAWAPAY_API_KEY', '')
 PAWAPAY_BASE_URL = os.getenv('PAWAPAY_BASE_URL', 'https://api.sandbox.pawapay.cloud')
+# Separate token PawaPay sends in the Authorization header of webhook callbacks.
+# Set this to the value from PawaPay dashboard → Settings → Callback Authentication Token.
+# Falls back to PAWAPAY_API_KEY if not set.
+PAWAPAY_CALLBACK_TOKEN = os.getenv('PAWAPAY_CALLBACK_TOKEN', '')
 
 # Email
 # Dev default: print emails to console. Set EMAIL_BACKEND in .env for production SMTP.

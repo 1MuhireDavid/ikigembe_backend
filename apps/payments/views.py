@@ -283,11 +283,29 @@ class PawapayWebhookView(APIView):
         responses={200: OpenApiResponse(description='Acknowledged')}
     )
     def post(self, request):
-        auth_header = request.headers.get('Authorization', '')
-        expected = f'Bearer {settings.PAWAPAY_API_KEY}'
-        if not settings.PAWAPAY_API_KEY or not secrets.compare_digest(auth_header, expected):
-            logger.warning('PawaPay webhook: invalid or missing Authorization header')
-            return Response(status=status.HTTP_200_OK)
+        # PawaPay sends a Bearer token in the Authorization header for webhook callbacks.
+        # This token is configured separately from the API key in the PawaPay dashboard
+        # (Settings → Callback Authentication Token). Fall back to PAWAPAY_API_KEY for
+        # deployments that haven't set a dedicated callback token yet.
+        callback_token = getattr(settings, 'PAWAPAY_CALLBACK_TOKEN', '') or settings.PAWAPAY_API_KEY
+
+        if callback_token:
+            auth_header = request.headers.get('Authorization', '')
+            expected = f'Bearer {callback_token}'
+            if not secrets.compare_digest(auth_header, expected):
+                # Log a masked version of the received header to aid debugging.
+                masked = auth_header[:12] + '…' if len(auth_header) > 12 else repr(auth_header)
+                logger.warning(
+                    'PawaPay webhook: Authorization mismatch — received %s. '
+                    'Check PAWAPAY_CALLBACK_TOKEN matches the token configured in the PawaPay dashboard.',
+                    masked,
+                )
+                return Response(status=status.HTTP_200_OK)
+        else:
+            logger.warning(
+                'PawaPay webhook: no callback token configured (PAWAPAY_CALLBACK_TOKEN / PAWAPAY_API_KEY). '
+                'Processing callback without authentication.'
+            )
 
         data = request.data
         pawapay_status = data.get('status', '').upper()
