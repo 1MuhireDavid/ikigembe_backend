@@ -5,6 +5,17 @@ from django.db.models.functions import Coalesce
 from apps.payments.models import Payment, WithdrawalRequest
 
 
+def producer_split(gross: int) -> tuple:
+    """Return (producer_earnings, ikigembe_commission) for a gross amount.
+
+    Producer share is computed first as (gross * 70) // 100; commission is
+    the remainder.  This guarantees producer_earnings + commission == gross
+    regardless of rounding, so all endpoints report consistent figures.
+    """
+    producer_earnings = (gross * 70) // 100
+    return producer_earnings, gross - producer_earnings
+
+
 def get_producer_wallet(producer):
     """
     Compute wallet stats for a producer.
@@ -19,7 +30,7 @@ def get_producer_wallet(producer):
         status='Completed',
     ).aggregate(total=Coalesce(Sum('amount'), 0))['total']
 
-    total_earnings = (raw_revenue * 70) // 100
+    total_earnings, ikigembe_commission = producer_split(raw_revenue)
 
     locked = WithdrawalRequest.objects.filter(
         producer=producer,
@@ -35,8 +46,6 @@ def get_producer_wallet(producer):
         producer=producer,
         status='Completed',
     ).aggregate(total=Coalesce(Sum('amount'), 0))['total']
-
-    ikigembe_commission = raw_revenue - total_earnings   # 30%
 
     return {
         'gross_revenue': raw_revenue,
@@ -71,10 +80,12 @@ class WithdrawalRequestSerializer(serializers.ModelSerializer):
                             'tax_amount', 'amount_after_tax']
 
     def get_tax_amount(self, obj):
-        return (obj.amount * 30) // 100
+        _, commission = producer_split(obj.amount)  # reuse canonical split; tax mirrors Ikigembe's 30%
+        return commission
 
     def get_amount_after_tax(self, obj):
-        return obj.amount - (obj.amount * 30) // 100
+        after_tax, _ = producer_split(obj.amount)
+        return after_tax
 
     def validate(self, data):
         method = data.get('payment_method')

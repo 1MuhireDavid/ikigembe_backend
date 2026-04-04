@@ -961,7 +961,9 @@ class AdminUserResetPasswordView(AdminBaseView):
 
         temp_password = secrets.token_urlsafe(10)
         user.set_password(temp_password)
-        user.save(update_fields=['password'])
+        # Rotate session key so all existing JWTs are immediately invalidated
+        user.active_session_key = str(uuid.uuid4())
+        user.save(update_fields=['password', 'active_session_key'])
 
         _log_admin_action(
             request, 'reset_user_password', target_user=user,

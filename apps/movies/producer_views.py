@@ -13,7 +13,7 @@ from apps.users.permissions import IsProducerRole
 from apps.movies.models import Movie
 from apps.movies.serializers import ProducerMovieListSerializer, ProducerMovieDetailSerializer
 from apps.payments.models import Payment, WithdrawalRequest
-from apps.payments.serializers import WithdrawalRequestSerializer, get_producer_wallet
+from apps.payments.serializers import WithdrawalRequestSerializer, get_producer_wallet, producer_split
 
 
 def _safe_page(request):
@@ -210,7 +210,7 @@ class ProducerWithdrawalsView(ProducerBaseView):
                 status='Completed',
             ).aggregate(total=Coalesce(Sum('amount'), 0))['total']
 
-            balance = (raw_revenue * 70) // 100 - locked
+            balance = producer_split(raw_revenue)[0] - locked
 
             if amount > balance:
                 return Response(
@@ -279,8 +279,7 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
         ).select_related('user').order_by('-created_at')
 
         gross = payments.aggregate(total=Coalesce(Sum('amount'), 0))['total']
-        commission = (gross * 30) // 100
-        earnings = gross - commission
+        earnings, commission = producer_split(gross)
 
         page = _safe_page(request)
         page_size = 20
@@ -386,12 +385,12 @@ class ProducerEarningsReportView(ProducerBaseView):
         results = []
         for row in rows:
             gross = row['gross']
-            commission = (gross * 30) // 100
+            earnings, commission = producer_split(gross)
             results.append({
                 'period_start': row['bucket'],
                 'gross_revenue': gross,
                 'ikigembe_commission': commission,
-                'producer_earnings': gross - commission,
+                'producer_earnings': earnings,
                 'transactions': row['count'],
             })
 
@@ -407,9 +406,9 @@ class ProducerTransactionHistoryView(ProducerBaseView):
         tags=[_TAG],
         summary='My transaction history',
         description=(
-            'Returns a unified, chronological list of all incoming payments (movie purchases) '
-            'and outgoing withdrawal requests. Incoming entries show the producer\'s 70% share. '
-            'Withdrawals show requested amount, 30% tax, and amount after tax.'
+            'Returns two DB-paginated sections: completed incoming payments and all withdrawal '
+            'requests. Only Completed payments are included in the earnings section. '
+            'Use the `?page` parameter for both sections simultaneously.'
         ),
         parameters=[
             OpenApiParameter('page', OpenApiTypes.INT, OpenApiParameter.QUERY,
@@ -419,22 +418,33 @@ class ProducerTransactionHistoryView(ProducerBaseView):
             200: inline_serializer(
                 name='TransactionHistoryResponse',
                 fields={
-                    'page': drf_serializers.IntegerField(),
-                    'total_results': drf_serializers.IntegerField(),
-                    'total_pages': drf_serializers.IntegerField(),
-                    'results': inline_serializer(
-                        name='TransactionEntry',
+                    'payments': inline_serializer(
+                        name='PaymentTransactionSection',
                         fields={
-                            'type': drf_serializers.CharField(help_text='"payment" or "withdrawal"'),
-                            'date': drf_serializers.DateTimeField(),
-                            'description': drf_serializers.CharField(),
-                            'gross_amount': drf_serializers.IntegerField(help_text='Full amount (RWF)'),
-                            'producer_share': drf_serializers.IntegerField(
-                                help_text='For payments: 70% of gross. For withdrawals: amount after 30% tax (RWF)'
+                            'page': drf_serializers.IntegerField(),
+                            'total_results': drf_serializers.IntegerField(),
+                            'total_pages': drf_serializers.IntegerField(),
+                            'results': inline_serializer(
+                                name='IncomingPaymentEntry',
+                                fields={
+                                    'id': drf_serializers.IntegerField(),
+                                    'movie_title': drf_serializers.CharField(),
+                                    'gross_amount': drf_serializers.IntegerField(help_text='Full payment amount (RWF)'),
+                                    'producer_earnings': drf_serializers.IntegerField(help_text='Your 70% share (RWF)'),
+                                    'date': drf_serializers.DateTimeField(),
+                                },
+                                many=True,
                             ),
-                            'status': drf_serializers.CharField(),
                         },
-                        many=True,
+                    ),
+                    'withdrawals': inline_serializer(
+                        name='WithdrawalTransactionSection',
+                        fields={
+                            'page': drf_serializers.IntegerField(),
+                            'total_results': drf_serializers.IntegerField(),
+                            'total_pages': drf_serializers.IntegerField(),
+                            'results': WithdrawalRequestSerializer(many=True),
+                        },
                     ),
                 },
             ),
@@ -442,50 +452,47 @@ class ProducerTransactionHistoryView(ProducerBaseView):
         },
     )
     def get(self, request):
-        payments = Payment.objects.filter(
-            movie__producer_profile=request.user,
-        ).select_related('movie').order_by('-created_at')
-
-        withdrawals = WithdrawalRequest.objects.filter(
-            producer=request.user,
-        ).order_by('-created_at')
-
-        entries = []
-
-        for p in payments:
-            gross = p.amount
-            entries.append({
-                'type': 'payment',
-                'date': p.created_at,
-                'description': f'Purchase: {p.movie.title if p.movie else "Unknown"}',
-                'gross_amount': gross,
-                'producer_share': (gross * 70) // 100,
-                'status': p.status,
-            })
-
-        for w in withdrawals:
-            tax = (w.amount * 30) // 100
-            entries.append({
-                'type': 'withdrawal',
-                'date': w.created_at,
-                'description': f'Withdrawal via {w.payment_method}',
-                'gross_amount': w.amount,
-                'producer_share': w.amount - tax,
-                'status': w.status,
-            })
-
-        # Sort combined list by date descending
-        entries.sort(key=lambda e: e['date'], reverse=True)
-
         page = _safe_page(request)
         page_size = 20
         start = (page - 1) * page_size
-        total = len(entries)
-        page_entries = entries[start:start + page_size]
+
+        # Completed payments only — consistent with all other financial endpoints
+        payments_qs = Payment.objects.filter(
+            movie__producer_profile=request.user,
+            status='Completed',
+        ).select_related('movie').order_by('-created_at')
+
+        payments_total = payments_qs.count()
+        payment_entries = []
+        for p in payments_qs[start:start + page_size]:
+            earnings, _ = producer_split(p.amount)
+            payment_entries.append({
+                'id': p.id,
+                'movie_title': p.movie.title if p.movie else 'Unknown',
+                'gross_amount': p.amount,
+                'producer_earnings': earnings,
+                'date': p.created_at,
+            })
+
+        withdrawals_qs = WithdrawalRequest.objects.filter(
+            producer=request.user,
+        ).order_by('-created_at')
+
+        withdrawals_total = withdrawals_qs.count()
 
         return Response({
-            'page': page,
-            'total_results': total,
-            'total_pages': (total + page_size - 1) // page_size,
-            'results': page_entries,
+            'payments': {
+                'page': page,
+                'total_results': payments_total,
+                'total_pages': (payments_total + page_size - 1) // page_size,
+                'results': payment_entries,
+            },
+            'withdrawals': {
+                'page': page,
+                'total_results': withdrawals_total,
+                'total_pages': (withdrawals_total + page_size - 1) // page_size,
+                'results': WithdrawalRequestSerializer(
+                    withdrawals_qs[start:start + page_size], many=True
+                ).data,
+            },
         })

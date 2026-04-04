@@ -483,25 +483,21 @@ class ForgotPasswordView(APIView):
             User.objects.filter(email__iexact=identifier).first()
             or User.objects.filter(phone_number=identifier).first()
         )
-        if user:
-            if user.email:
-                token_obj = PasswordResetToken.make(user)
-                send_password_reset_email(user, token_obj.token)
-                return Response({'message': 'A password reset link has been sent to your email address.'})
-            else:
-                # Phone-only account — cannot reset via email
-                return Response(
-                    {
-                        'message': (
-                            'This account does not have an email address. '
-                            'Please contact Ikigembe support to reset your password. '
-                            'An admin can generate a temporary password for you.'
-                        )
-                    },
-                    status=status.HTTP_200_OK,
-                )
-        # No account found — vague response to prevent enumeration
-        return Response({'message': 'If an account with that identifier exists, a reset link has been sent.'})
+        # Send the reset email only when the account has an email address.
+        # Phone-only accounts and unknown identifiers all receive the same
+        # response to prevent account enumeration.
+        if user and user.email:
+            token_obj = PasswordResetToken.make(user)
+            send_password_reset_email(user, token_obj.token)
+
+        return Response({
+            'message': (
+                'If an account with that identifier exists and has a registered email address, '
+                'a password reset link has been sent. '
+                'For phone-only accounts, please contact Ikigembe support — '
+                'an admin can generate a temporary password.'
+            )
+        })
 
 
 class ResetPasswordView(APIView):
@@ -531,7 +527,7 @@ class ResetPasswordView(APIView):
     def post(self, request):
         from .models import PasswordResetToken
         from django.contrib.auth.password_validation import validate_password
-        from rest_framework.exceptions import ValidationError as DRFValidationError
+        from django.db import transaction as db_transaction
 
         token_str = (request.data.get('token') or '').strip()
         new_password = request.data.get('new_password', '')
@@ -542,7 +538,10 @@ class ResetPasswordView(APIView):
         if new_password != confirm_password:
             return Response({'error': 'Passwords do not match.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Validate password before acquiring the lock — avoids holding the row
+        # lock while Django runs password validators.
         try:
+            # Fetch without lock first just to get the user for validation.
             token_obj = PasswordResetToken.objects.select_related('user').get(token=token_str)
         except PasswordResetToken.DoesNotExist:
             return Response({'error': 'Invalid or expired reset token.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -556,10 +555,28 @@ class ResetPasswordView(APIView):
             return Response({'error': list(e.messages) if hasattr(e, 'messages') else str(e)},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        token_obj.user.set_password(new_password)
-        token_obj.user.save(update_fields=['password'])
-        token_obj.used = True
-        token_obj.save(update_fields=['used'])
+        # Atomic: re-fetch with row lock, re-validate, then commit all changes
+        # together to close the TOCTOU window.
+        with db_transaction.atomic():
+            try:
+                token_obj = PasswordResetToken.objects.select_for_update().select_related('user').get(
+                    token=token_str, used=False
+                )
+            except PasswordResetToken.DoesNotExist:
+                return Response({'error': 'Invalid or expired reset token.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if not token_obj.is_valid():
+                return Response({'error': 'This reset link has expired. Please request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            token_obj.used = True
+            token_obj.save(update_fields=['used'])
+
+            # Rotate session key so all existing JWTs are immediately invalidated
+            # (Fix 3: reset must revoke outstanding tokens)
+            user = token_obj.user
+            user.set_password(new_password)
+            user.active_session_key = str(uuid.uuid4())
+            user.save(update_fields=['password', 'active_session_key'])
 
         return Response({'message': 'Password reset successfully. You can now log in.'})
 
