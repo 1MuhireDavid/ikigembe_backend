@@ -12,6 +12,7 @@ class MovieSerializer(serializers.ModelSerializer):
     video_url = serializers.SerializerMethodField()
     subtitles_url = serializers.SerializerMethodField()
     producer_profile = serializers.SerializerMethodField()
+    has_purchased = serializers.SerializerMethodField()
 
     class Meta:
         model = Movie
@@ -32,6 +33,7 @@ class MovieSerializer(serializers.ModelSerializer):
             'has_free_preview',
             'producer',
             'producer_profile',
+            'has_purchased',
         ]
 
     def get_thumbnail_url(self, obj):
@@ -64,6 +66,15 @@ class MovieSerializer(serializers.ModelSerializer):
             'name': user.full_name or obj.producer or '',
         }
 
+    def get_has_purchased(self, obj):
+        """True if the authenticated user has a completed payment for this movie."""
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            return False
+        return Payment.objects.filter(
+            user=request.user, movie=obj, status='Completed'
+        ).exists()
+
 
 class MovieDetailSerializer(serializers.ModelSerializer):
     """Detailed movie serializer - includes trailer info"""
@@ -74,6 +85,7 @@ class MovieDetailSerializer(serializers.ModelSerializer):
     video_url = serializers.SerializerMethodField()
     subtitles_url = serializers.SerializerMethodField()
     producer_profile = serializers.SerializerMethodField()
+    has_purchased = serializers.SerializerMethodField()
 
     class Meta:
         model = Movie
@@ -99,6 +111,7 @@ class MovieDetailSerializer(serializers.ModelSerializer):
             'genres',
             'producer',
             'producer_profile',
+            'has_purchased',
         ]
 
     def get_thumbnail_url(self, obj):
@@ -124,6 +137,15 @@ class MovieDetailSerializer(serializers.ModelSerializer):
             'id': user.id,
             'name': user.full_name or obj.producer or '',
         }
+
+    def get_has_purchased(self, obj):
+        """True if the authenticated user has a completed payment for this movie."""
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            return False
+        return Payment.objects.filter(
+            user=request.user, movie=obj, status='Completed'
+        ).exists()
 
 
 class ProducerMovieListSerializer(serializers.ModelSerializer):
