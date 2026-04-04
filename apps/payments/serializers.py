@@ -36,7 +36,11 @@ def get_producer_wallet(producer):
         status='Completed',
     ).aggregate(total=Coalesce(Sum('amount'), 0))['total']
 
+    ikigembe_commission = raw_revenue - total_earnings   # 30%
+
     return {
+        'gross_revenue': raw_revenue,
+        'ikigembe_commission': ikigembe_commission,
         'total_earnings': total_earnings,
         'wallet_balance': total_earnings - locked,
         'pending_withdrawals': pending,
@@ -47,15 +51,30 @@ def get_producer_wallet(producer):
 class WithdrawalRequestSerializer(serializers.ModelSerializer):
     """Producer-facing serializer: create requests and view history."""
 
+    # Tax breakdown fields (30% government tax on withdrawal)
+    tax_amount = serializers.SerializerMethodField(
+        help_text='30% government tax deducted from the requested amount (RWF)'
+    )
+    amount_after_tax = serializers.SerializerMethodField(
+        help_text='Final amount the producer receives after 30% tax deduction (RWF)'
+    )
+
     class Meta:
         model = WithdrawalRequest
         fields = [
-            'id', 'amount', 'payment_method',
+            'id', 'amount', 'tax_amount', 'amount_after_tax', 'payment_method',
             'bank_name', 'account_number', 'account_holder_name',
             'momo_number', 'momo_provider',
             'status', 'created_at', 'processed_at',
         ]
-        read_only_fields = ['id', 'status', 'created_at', 'processed_at']
+        read_only_fields = ['id', 'status', 'created_at', 'processed_at',
+                            'tax_amount', 'amount_after_tax']
+
+    def get_tax_amount(self, obj):
+        return (obj.amount * 30) // 100
+
+    def get_amount_after_tax(self, obj):
+        return obj.amount - (obj.amount * 30) // 100
 
     def validate(self, data):
         method = data.get('payment_method')

@@ -1,6 +1,7 @@
 from django.db import transaction
-from django.db.models import Sum
-from django.db.models.functions import Coalesce
+from django.db.models import Sum, Count, Q
+from django.db.models.functions import Coalesce, TruncDay, TruncWeek, TruncMonth
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -115,7 +116,9 @@ class ProducerWalletView(ProducerBaseView):
             200: inline_serializer(
                 name='ProducerWallet',
                 fields={
-                    'total_earnings': drf_serializers.IntegerField(help_text='70% of all completed revenue from your movies (RWF)'),
+                    'gross_revenue': drf_serializers.IntegerField(help_text='Total completed payment revenue from your movies (RWF)'),
+                    'ikigembe_commission': drf_serializers.IntegerField(help_text='30% platform commission deducted from gross revenue (RWF)'),
+                    'total_earnings': drf_serializers.IntegerField(help_text='Your 70% share of gross revenue (RWF)'),
                     'wallet_balance': drf_serializers.IntegerField(help_text='Available balance — total_earnings minus locked/paid amounts (RWF)'),
                     'pending_withdrawals': drf_serializers.IntegerField(help_text='Amount locked in pending withdrawal requests (RWF)'),
                     'total_withdrawn': drf_serializers.IntegerField(help_text='Total amount paid out so far (RWF)'),
@@ -218,3 +221,271 @@ class ProducerWithdrawalsView(ProducerBaseView):
             serializer.save(producer=request.user, status='Pending')
 
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+# ─────────────────────────────────────────────
+# Per-movie Analytics
+# ─────────────────────────────────────────────
+
+class ProducerMovieAnalyticsView(ProducerBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Analytics for one of my movies',
+        description=(
+            'Returns view count, revenue breakdown (gross / 30% commission / 70% earnings), '
+            'total buyers, and a paginated list of individual purchases for a specific movie.'
+        ),
+        parameters=[
+            OpenApiParameter('page', OpenApiTypes.INT, OpenApiParameter.QUERY,
+                             required=False, default=1, description='Page number (20 per page)'),
+        ],
+        responses={
+            200: inline_serializer(
+                name='MovieAnalytics',
+                fields={
+                    'movie_id': drf_serializers.IntegerField(),
+                    'title': drf_serializers.CharField(),
+                    'views': drf_serializers.IntegerField(),
+                    'total_buyers': drf_serializers.IntegerField(help_text='Number of completed purchases'),
+                    'gross_revenue': drf_serializers.IntegerField(help_text='Sum of all completed payments (RWF)'),
+                    'ikigembe_commission': drf_serializers.IntegerField(help_text='30% platform share (RWF)'),
+                    'producer_earnings': drf_serializers.IntegerField(help_text='70% producer share (RWF)'),
+                    'page': drf_serializers.IntegerField(),
+                    'total_results': drf_serializers.IntegerField(),
+                    'total_pages': drf_serializers.IntegerField(),
+                    'buyers': inline_serializer(
+                        name='BuyerEntry',
+                        fields={
+                            'buyer_name': drf_serializers.CharField(),
+                            'amount_paid': drf_serializers.IntegerField(help_text='RWF'),
+                            'purchased_at': drf_serializers.DateTimeField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            403: OpenApiResponse(description='Producer role required'),
+            404: OpenApiResponse(description='Movie not found or not owned by this producer'),
+        },
+    )
+    def get(self, request, id):
+        try:
+            movie = Movie.objects.get(id=id, producer_profile=request.user)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        payments = Payment.objects.filter(
+            movie=movie, status='Completed'
+        ).select_related('user').order_by('-created_at')
+
+        gross = payments.aggregate(total=Coalesce(Sum('amount'), 0))['total']
+        commission = (gross * 30) // 100
+        earnings = gross - commission
+
+        page = _safe_page(request)
+        page_size = 20
+        start = (page - 1) * page_size
+        total = payments.count()
+
+        buyers = [
+            {
+                'buyer_name': p.user.full_name or p.user.email or p.user.phone_number,
+                'amount_paid': p.amount,
+                'purchased_at': p.created_at,
+            }
+            for p in payments[start:start + page_size]
+        ]
+
+        return Response({
+            'movie_id': movie.id,
+            'title': movie.title,
+            'views': movie.views,
+            'total_buyers': total,
+            'gross_revenue': gross,
+            'ikigembe_commission': commission,
+            'producer_earnings': earnings,
+            'page': page,
+            'total_results': total,
+            'total_pages': (total + page_size - 1) // page_size,
+            'buyers': buyers,
+        })
+
+
+# ─────────────────────────────────────────────
+# Earnings Report (daily / weekly / monthly)
+# ─────────────────────────────────────────────
+
+class ProducerEarningsReportView(ProducerBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Earnings report by period',
+        description=(
+            'Returns earnings grouped by day (last 30 days), week (last 12 weeks), '
+            'or month (last 12 months). Each bucket shows gross revenue, '
+            'Ikigembe 30% commission, and the producer\'s 70% net earnings.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='period',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                enum=['daily', 'weekly', 'monthly'],
+                default='monthly',
+                description='Grouping period',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='EarningsReport',
+                fields={
+                    'period': drf_serializers.CharField(help_text='daily | weekly | monthly'),
+                    'results': inline_serializer(
+                        name='EarningsBucket',
+                        fields={
+                            'period_start': drf_serializers.DateTimeField(),
+                            'gross_revenue': drf_serializers.IntegerField(help_text='RWF'),
+                            'ikigembe_commission': drf_serializers.IntegerField(help_text='30% (RWF)'),
+                            'producer_earnings': drf_serializers.IntegerField(help_text='70% (RWF)'),
+                            'transactions': drf_serializers.IntegerField(help_text='Number of completed purchases'),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            403: OpenApiResponse(description='Producer role required'),
+        },
+    )
+    def get(self, request):
+        period = request.query_params.get('period', 'monthly')
+        now = timezone.now()
+
+        if period == 'daily':
+            trunc_fn = TruncDay
+            cutoff = now - timezone.timedelta(days=30)
+        elif period == 'weekly':
+            trunc_fn = TruncWeek
+            cutoff = now - timezone.timedelta(weeks=12)
+        else:
+            period = 'monthly'
+            trunc_fn = TruncMonth
+            cutoff = now - timezone.timedelta(days=365)
+
+        rows = (
+            Payment.objects.filter(
+                movie__producer_profile=request.user,
+                status='Completed',
+                created_at__gte=cutoff,
+            )
+            .annotate(bucket=trunc_fn('created_at'))
+            .values('bucket')
+            .annotate(gross=Coalesce(Sum('amount'), 0), count=Count('id'))
+            .order_by('bucket')
+        )
+
+        results = []
+        for row in rows:
+            gross = row['gross']
+            commission = (gross * 30) // 100
+            results.append({
+                'period_start': row['bucket'],
+                'gross_revenue': gross,
+                'ikigembe_commission': commission,
+                'producer_earnings': gross - commission,
+                'transactions': row['count'],
+            })
+
+        return Response({'period': period, 'results': results})
+
+
+# ─────────────────────────────────────────────
+# Transaction History (payments in + withdrawals out)
+# ─────────────────────────────────────────────
+
+class ProducerTransactionHistoryView(ProducerBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='My transaction history',
+        description=(
+            'Returns a unified, chronological list of all incoming payments (movie purchases) '
+            'and outgoing withdrawal requests. Incoming entries show the producer\'s 70% share. '
+            'Withdrawals show requested amount, 30% tax, and amount after tax.'
+        ),
+        parameters=[
+            OpenApiParameter('page', OpenApiTypes.INT, OpenApiParameter.QUERY,
+                             required=False, default=1, description='Page number (20 per page)'),
+        ],
+        responses={
+            200: inline_serializer(
+                name='TransactionHistoryResponse',
+                fields={
+                    'page': drf_serializers.IntegerField(),
+                    'total_results': drf_serializers.IntegerField(),
+                    'total_pages': drf_serializers.IntegerField(),
+                    'results': inline_serializer(
+                        name='TransactionEntry',
+                        fields={
+                            'type': drf_serializers.CharField(help_text='"payment" or "withdrawal"'),
+                            'date': drf_serializers.DateTimeField(),
+                            'description': drf_serializers.CharField(),
+                            'gross_amount': drf_serializers.IntegerField(help_text='Full amount (RWF)'),
+                            'producer_share': drf_serializers.IntegerField(
+                                help_text='For payments: 70% of gross. For withdrawals: amount after 30% tax (RWF)'
+                            ),
+                            'status': drf_serializers.CharField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            403: OpenApiResponse(description='Producer role required'),
+        },
+    )
+    def get(self, request):
+        payments = Payment.objects.filter(
+            movie__producer_profile=request.user,
+        ).select_related('movie').order_by('-created_at')
+
+        withdrawals = WithdrawalRequest.objects.filter(
+            producer=request.user,
+        ).order_by('-created_at')
+
+        entries = []
+
+        for p in payments:
+            gross = p.amount
+            entries.append({
+                'type': 'payment',
+                'date': p.created_at,
+                'description': f'Purchase: {p.movie.title if p.movie else "Unknown"}',
+                'gross_amount': gross,
+                'producer_share': (gross * 70) // 100,
+                'status': p.status,
+            })
+
+        for w in withdrawals:
+            tax = (w.amount * 30) // 100
+            entries.append({
+                'type': 'withdrawal',
+                'date': w.created_at,
+                'description': f'Withdrawal via {w.payment_method}',
+                'gross_amount': w.amount,
+                'producer_share': w.amount - tax,
+                'status': w.status,
+            })
+
+        # Sort combined list by date descending
+        entries.sort(key=lambda e: e['date'], reverse=True)
+
+        page = _safe_page(request)
+        page_size = 20
+        start = (page - 1) * page_size
+        total = len(entries)
+        page_entries = entries[start:start + page_size]
+
+        return Response({
+            'page': page,
+            'total_results': total,
+            'total_pages': (total + page_size - 1) // page_size,
+            'results': page_entries,
+        })

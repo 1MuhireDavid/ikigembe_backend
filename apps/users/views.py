@@ -10,16 +10,18 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
-from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
+from rest_framework import serializers as drf_serializers
+from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiResponse, OpenApiExample
 from .serializers import (
     GoogleAuthSerializer,
     LoginSerializer,
     NotificationPreferencesSerializer,
+    ProfileUpdateSerializer,
     RegisterSerializer,
     UserSerializer,
     RefreshSerializer
 )
-from .emails import send_welcome_email
+from .emails import send_welcome_email, send_password_reset_email
 
 User = get_user_model()
 
@@ -412,7 +414,7 @@ class TokenRefreshView(APIView):
 # ─────────────────────────────────────────────
 
 class MeView(APIView):
-    """Return the authenticated user's profile."""
+    """Return or update the authenticated user's profile."""
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
@@ -427,6 +429,139 @@ class MeView(APIView):
     def get(self, request):
         serializer = UserSerializer(request.user)
         return Response(serializer.data)
+
+    @extend_schema(
+        request=ProfileUpdateSerializer,
+        responses={
+            200: UserSerializer(),
+            400: OpenApiResponse(description='Validation error'),
+            401: OpenApiResponse(description='Authentication credentials were not provided'),
+        },
+        tags=['User'],
+        summary='Update current user profile',
+        description=(
+            'Update first name, last name, email, phone number, or avatar URL. '
+            'At least one of email or phone number must remain set.'
+        ),
+    )
+    def patch(self, request):
+        serializer = ProfileUpdateSerializer(request.user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(UserSerializer(request.user).data)
+
+
+# ─────────────────────────────────────────────
+# Password Reset
+# ─────────────────────────────────────────────
+
+class ForgotPasswordView(APIView):
+    """Request a password-reset email using email or phone."""
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        tags=['Authentication'],
+        summary='Request password reset',
+        description=(
+            'Send a password-reset link to the email address associated with the account. '
+            'Accepts either an email address or phone number as `identifier`. '
+            'Always returns 200 to avoid account enumeration.'
+        ),
+        request=inline_serializer(
+            name='ForgotPasswordRequest',
+            fields={'identifier': drf_serializers.CharField(help_text='Email or phone number')},
+        ),
+        responses={200: inline_serializer(
+            name='ForgotPasswordResponse',
+            fields={'message': drf_serializers.CharField()},
+        )},
+    )
+    def post(self, request):
+        from .models import PasswordResetToken
+        identifier = (request.data.get('identifier') or '').strip()
+        user = (
+            User.objects.filter(email__iexact=identifier).first()
+            or User.objects.filter(phone_number=identifier).first()
+        )
+        if user:
+            if user.email:
+                token_obj = PasswordResetToken.make(user)
+                send_password_reset_email(user, token_obj.token)
+                return Response({'message': 'A password reset link has been sent to your email address.'})
+            else:
+                # Phone-only account — cannot reset via email
+                return Response(
+                    {
+                        'message': (
+                            'This account does not have an email address. '
+                            'Please contact Ikigembe support to reset your password. '
+                            'An admin can generate a temporary password for you.'
+                        )
+                    },
+                    status=status.HTTP_200_OK,
+                )
+        # No account found — vague response to prevent enumeration
+        return Response({'message': 'If an account with that identifier exists, a reset link has been sent.'})
+
+
+class ResetPasswordView(APIView):
+    """Consume a reset token and set a new password."""
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        tags=['Authentication'],
+        summary='Reset password with token',
+        description='Provide the token from the reset email and a new password.',
+        request=inline_serializer(
+            name='ResetPasswordRequest',
+            fields={
+                'token': drf_serializers.CharField(),
+                'new_password': drf_serializers.CharField(style={'input_type': 'password'}),
+                'confirm_password': drf_serializers.CharField(style={'input_type': 'password'}),
+            },
+        ),
+        responses={
+            200: inline_serializer(
+                name='ResetPasswordResponse',
+                fields={'message': drf_serializers.CharField()},
+            ),
+            400: OpenApiResponse(description='Invalid/expired token or password mismatch'),
+        },
+    )
+    def post(self, request):
+        from .models import PasswordResetToken
+        from django.contrib.auth.password_validation import validate_password
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+
+        token_str = (request.data.get('token') or '').strip()
+        new_password = request.data.get('new_password', '')
+        confirm_password = request.data.get('confirm_password', '')
+
+        if not token_str:
+            return Response({'error': 'Token is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if new_password != confirm_password:
+            return Response({'error': 'Passwords do not match.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            token_obj = PasswordResetToken.objects.select_related('user').get(token=token_str)
+        except PasswordResetToken.DoesNotExist:
+            return Response({'error': 'Invalid or expired reset token.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not token_obj.is_valid():
+            return Response({'error': 'This reset link has expired. Please request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            validate_password(new_password, token_obj.user)
+        except Exception as e:
+            return Response({'error': list(e.messages) if hasattr(e, 'messages') else str(e)},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        token_obj.user.set_password(new_password)
+        token_obj.user.save(update_fields=['password'])
+        token_obj.used = True
+        token_obj.save(update_fields=['used'])
+
+        return Response({'message': 'Password reset successfully. You can now log in.'})
 
 
 class LogoutView(APIView):
