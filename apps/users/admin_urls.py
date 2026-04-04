@@ -19,6 +19,7 @@ from .admin_views import (
     AdminTopMoviesView,
     AdminUserGrowthView,
     AdminWithdrawalSummaryView,
+    AdminProducerMoviePurchasesView,
 )
 
 urlpatterns = [
@@ -39,6 +40,7 @@ urlpatterns = [
     path('producers/<int:user_id>/approve/', AdminProducerApproveView.as_view(), name='admin-producer-approve'),
     path('producers/<int:user_id>/suspend/', AdminProducerSuspendView.as_view(), name='admin-producer-suspend'),
     path('producers/<int:user_id>/report/', AdminProducerReportView.as_view(), name='admin-producer-report'),
+    path('producers/<int:user_id>/movies/<int:movie_id>/purchases/', AdminProducerMoviePurchasesView.as_view(), name='admin-producer-movie-purchases'),
 
     # Analytics Reports
     path('reports/revenue-trend/', AdminRevenueTrendView.as_view(), name='admin-revenue-trend'),

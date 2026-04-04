@@ -1,5 +1,5 @@
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Sum, Count, Q
 from django.db.models.functions import Coalesce, TruncMonth
 from django.utils import timezone
 from datetime import timedelta
@@ -136,10 +136,9 @@ class ProducerReportView(ProducerBaseView):
         tags=[_TAG],
         summary='My movies performance report',
         description=(
-            'Returns the authenticated producer\'s wallet summary alongside per-movie stats: '
-            'view count, number of purchases, total revenue generated, and the producer\'s 70% share. '
-            'Individual purchase timestamps and amounts are included for income verification — '
-            'buyer identity is not exposed.'
+            'Returns the authenticated producer\'s wallet summary alongside per-movie aggregate stats: '
+            'view count, purchase count, total revenue, and the producer\'s 70% share. '
+            'Use `GET /producer/movies/<id>/purchases/` to page through individual purchase records.'
         ),
         responses={
             200: inline_serializer(
@@ -165,15 +164,6 @@ class ProducerReportView(ProducerBaseView):
                             'total_revenue': drf_serializers.IntegerField(help_text='Sum of completed payments (RWF)'),
                             'purchase_count': drf_serializers.IntegerField(),
                             'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
-                            'purchases': inline_serializer(
-                                name='ProducerReportPurchase',
-                                fields={
-                                    'amount': drf_serializers.IntegerField(),
-                                    'status': drf_serializers.CharField(),
-                                    'purchased_at': drf_serializers.DateTimeField(),
-                                },
-                                many=True,
-                            ),
                         },
                         many=True,
                     ),
@@ -184,50 +174,97 @@ class ProducerReportView(ProducerBaseView):
         },
     )
     def get(self, request):
-        from collections import defaultdict
-
         wallet = get_producer_wallet(request.user)
-        movies = Movie.objects.filter(producer_profile=request.user).order_by('-created_at')
-        movie_ids = list(movies.values_list('id', flat=True))
+        movies = Movie.objects.filter(producer_profile=request.user).annotate(
+            total_revenue=Coalesce(
+                Sum('payments__amount', filter=Q(payments__status='Completed')), 0
+            ),
+            purchase_count=Count('payments', filter=Q(payments__status='Completed')),
+        ).order_by('-created_at')
 
-        payments = (
-            Payment.objects
-            .filter(movie_id__in=movie_ids, status='Completed')
-            .order_by('-created_at')
-        )
-
-        payments_by_movie = defaultdict(list)
-        revenue_by_movie = defaultdict(int)
-        for p in payments:
-            payments_by_movie[p.movie_id].append(p)
-            revenue_by_movie[p.movie_id] += p.amount
-
-        movies_data = []
-        for movie in movies:
-            movie_payments = payments_by_movie[movie.id]
-            total_revenue = revenue_by_movie[movie.id]
-            movies_data.append({
+        movies_data = [
+            {
                 'id': movie.id,
                 'title': movie.title,
                 'price': movie.price,
                 'views': movie.views,
                 'release_date': movie.release_date,
-                'total_revenue': total_revenue,
-                'purchase_count': len(movie_payments),
-                'producer_share': (total_revenue * 70) // 100,
-                'purchases': [
-                    {
-                        'amount': p.amount,
-                        'status': p.status,
-                        'purchased_at': p.created_at,
-                    }
-                    for p in movie_payments
-                ],
-            })
+                'total_revenue': movie.total_revenue,
+                'purchase_count': movie.purchase_count,
+                'producer_share': (movie.total_revenue * 70) // 100,
+            }
+            for movie in movies
+        ]
 
         return Response({
             'wallet': wallet,
             'movies': movies_data,
+        })
+
+
+class ProducerMoviePurchasesView(ProducerBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Paginated purchase history for one of my movies',
+        description=(
+            'Returns completed purchases for the given movie (must belong to the authenticated producer), '
+            'newest first. Buyer identity is not exposed.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                default=1,
+                description='Page number (20 results per page)',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='ProducerMoviePurchaseList',
+                fields={
+                    'page': drf_serializers.IntegerField(),
+                    'total_results': drf_serializers.IntegerField(),
+                    'total_pages': drf_serializers.IntegerField(),
+                    'results': inline_serializer(
+                        name='ProducerMoviePurchaseItem',
+                        fields={
+                            'amount': drf_serializers.IntegerField(),
+                            'status': drf_serializers.CharField(),
+                            'purchased_at': drf_serializers.DateTimeField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Producer role required'),
+            404: OpenApiResponse(description='Movie not found or not owned by this producer'),
+        },
+    )
+    def get(self, request, id):
+        try:
+            movie = Movie.objects.get(id=id, producer_profile=request.user)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        qs = Payment.objects.filter(movie=movie, status='Completed').order_by('-created_at')
+        page = _safe_page(request)
+        page_size = 20
+        start = (page - 1) * page_size
+        total = qs.count()
+
+        results = [
+            {'amount': p.amount, 'status': p.status, 'purchased_at': p.created_at}
+            for p in qs[start:start + page_size]
+        ]
+
+        return Response({
+            'page': page,
+            'total_results': total,
+            'total_pages': (total + page_size - 1) // page_size,
+            'results': results,
         })
 
 
@@ -272,7 +309,7 @@ class ProducerRevenueTrendView(ProducerBaseView):
     )
     def get(self, request):
         try:
-            months = max(1, int(request.GET.get('months', 12)))
+            months = min(max(1, int(request.GET.get('months', 12))), 24)
         except (TypeError, ValueError):
             months = 12
 

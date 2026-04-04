@@ -6,6 +6,7 @@ from .producer_views import (
     ProducerWithdrawalsView,
     ProducerReportView,
     ProducerRevenueTrendView,
+    ProducerMoviePurchasesView,
 )
 
 urlpatterns = [
@@ -15,4 +16,5 @@ urlpatterns = [
     path('withdrawals/', ProducerWithdrawalsView.as_view(), name='producer-withdrawals'),
     path('report/', ProducerReportView.as_view(), name='producer-report'),
     path('revenue-trend/', ProducerRevenueTrendView.as_view(), name='producer-revenue-trend'),
+    path('movies/<int:id>/purchases/', ProducerMoviePurchasesView.as_view(), name='producer-movie-purchases'),
 ]

@@ -422,10 +422,9 @@ class AdminProducerReportView(AdminBaseView):
         tags=[_TAG],
         summary="Audit a producer's movie performance",
         description=(
-            'Returns the producer\'s wallet summary and a per-movie breakdown. '
-            'Each movie lists every completed purchase with full buyer details '
-            '(name, phone, deposit ID) so admins can verify view counts against '
-            'real transactions and confirm the 70/30 commission split is accurate.'
+            'Returns the producer\'s wallet summary and per-movie aggregate stats. '
+            'Use `GET /admin/dashboard/producers/<user_id>/movies/<movie_id>/purchases/` '
+            'to page through individual purchase records with full buyer details.'
         ),
         responses={
             200: inline_serializer(
@@ -455,19 +454,6 @@ class AdminProducerReportView(AdminBaseView):
                             'total_revenue': drf_serializers.IntegerField(help_text='Sum of completed payments (RWF)'),
                             'purchase_count': drf_serializers.IntegerField(),
                             'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
-                            'purchases': inline_serializer(
-                                name='AdminProducerReportPurchase',
-                                fields={
-                                    'payment_id': drf_serializers.IntegerField(),
-                                    'buyer_name': drf_serializers.CharField(),
-                                    'phone_number': drf_serializers.CharField(allow_null=True),
-                                    'amount': drf_serializers.IntegerField(),
-                                    'status': drf_serializers.CharField(),
-                                    'deposit_id': drf_serializers.CharField(allow_null=True),
-                                    'purchased_at': drf_serializers.DateTimeField(),
-                                },
-                                many=True,
-                            ),
                         },
                         many=True,
                     ),
@@ -479,53 +465,29 @@ class AdminProducerReportView(AdminBaseView):
         },
     )
     def get(self, request, user_id):
-        from collections import defaultdict
-
         producer = get_object_or_404(User, id=user_id, role='Producer')
         wallet = get_producer_wallet(producer)
 
-        movies = Movie.objects.filter(producer_profile=producer).order_by('-created_at')
-        movie_ids = list(movies.values_list('id', flat=True))
+        movies = Movie.objects.filter(producer_profile=producer).annotate(
+            total_revenue=Coalesce(
+                Sum('payments__amount', filter=Q(payments__status='Completed')), 0
+            ),
+            purchase_count=Count('payments', filter=Q(payments__status='Completed')),
+        ).order_by('-created_at')
 
-        payments = (
-            Payment.objects
-            .filter(movie_id__in=movie_ids, status='Completed')
-            .select_related('user')
-            .order_by('-created_at')
-        )
-
-        payments_by_movie = defaultdict(list)
-        revenue_by_movie = defaultdict(int)
-        for p in payments:
-            payments_by_movie[p.movie_id].append(p)
-            revenue_by_movie[p.movie_id] += p.amount
-
-        movies_data = []
-        for movie in movies:
-            movie_payments = payments_by_movie[movie.id]
-            total_revenue = revenue_by_movie[movie.id]
-            movies_data.append({
+        movies_data = [
+            {
                 'id': movie.id,
                 'title': movie.title,
                 'price': movie.price,
                 'views': movie.views,
                 'release_date': movie.release_date,
-                'total_revenue': total_revenue,
-                'purchase_count': len(movie_payments),
-                'producer_share': (total_revenue * 70) // 100,
-                'purchases': [
-                    {
-                        'payment_id': p.id,
-                        'buyer_name': p.user.full_name,
-                        'phone_number': p.phone_number,
-                        'amount': p.amount,
-                        'status': p.status,
-                        'deposit_id': p.deposit_id,
-                        'purchased_at': p.created_at,
-                    }
-                    for p in movie_payments
-                ],
-            })
+                'total_revenue': movie.total_revenue,
+                'purchase_count': movie.purchase_count,
+                'producer_share': (movie.total_revenue * 70) // 100,
+            }
+            for movie in movies
+        ]
 
         return Response({
             'producer': {
@@ -539,6 +501,88 @@ class AdminProducerReportView(AdminBaseView):
                 'total_withdrawn': wallet['total_withdrawn'],
             },
             'movies': movies_data,
+        })
+
+
+class AdminProducerMoviePurchasesView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary="Paginated purchase audit for a producer's movie",
+        description=(
+            'Returns completed purchases for a specific movie owned by the given producer, '
+            'newest first, with full buyer details (name, phone, deposit ID) for commission auditing.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                default=1,
+                description='Page number (20 results per page)',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='AdminMoviePurchaseList',
+                fields={
+                    'page': drf_serializers.IntegerField(),
+                    'total_results': drf_serializers.IntegerField(),
+                    'total_pages': drf_serializers.IntegerField(),
+                    'results': inline_serializer(
+                        name='AdminMoviePurchaseItem',
+                        fields={
+                            'payment_id': drf_serializers.IntegerField(),
+                            'buyer_name': drf_serializers.CharField(),
+                            'phone_number': drf_serializers.CharField(allow_null=True),
+                            'amount': drf_serializers.IntegerField(),
+                            'status': drf_serializers.CharField(),
+                            'deposit_id': drf_serializers.CharField(allow_null=True),
+                            'purchased_at': drf_serializers.DateTimeField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+            404: OpenApiResponse(description='Producer or movie not found'),
+        },
+    )
+    def get(self, request, user_id, movie_id):
+        producer = get_object_or_404(User, id=user_id, role='Producer')
+        movie = get_object_or_404(Movie, id=movie_id, producer_profile=producer)
+
+        qs = (
+            Payment.objects
+            .filter(movie=movie, status='Completed')
+            .select_related('user')
+            .order_by('-created_at')
+        )
+
+        page = _safe_page(request)
+        page_size = 20
+        start = (page - 1) * page_size
+        total = qs.count()
+
+        results = [
+            {
+                'payment_id': p.id,
+                'buyer_name': p.user.full_name,
+                'phone_number': p.phone_number,
+                'amount': p.amount,
+                'status': p.status,
+                'deposit_id': p.deposit_id,
+                'purchased_at': p.created_at,
+            }
+            for p in qs[start:start + page_size]
+        ]
+
+        return Response({
+            'page': page,
+            'total_results': total,
+            'total_pages': (total + page_size - 1) // page_size,
+            'results': results,
         })
 
 
@@ -935,9 +979,12 @@ class AdminWithdrawalRejectView(AdminBaseView):
 # Analytics Reports
 # ─────────────────────────────────────────────
 
-def _safe_int(request, param, default, minimum=1):
+def _safe_int(request, param, default, minimum=1, maximum=None):
     try:
-        return max(minimum, int(request.GET.get(param, default)))
+        val = max(minimum, int(request.GET.get(param, default)))
+        if maximum is not None:
+            val = min(val, maximum)
+        return val
     except (TypeError, ValueError):
         return default
 
@@ -996,7 +1043,7 @@ class AdminRevenueTrendView(AdminBaseView):
         from datetime import timedelta
 
         period = request.GET.get('period', 'monthly')
-        n = _safe_int(request, 'periods', 12)
+        n = _safe_int(request, 'periods', 12, maximum=52)
 
         if period == 'weekly':
             trunc_fn = TruncWeek
@@ -1154,7 +1201,7 @@ class AdminUserGrowthView(AdminBaseView):
     def get(self, request):
         from datetime import timedelta
 
-        months = _safe_int(request, 'months', 12)
+        months = _safe_int(request, 'months', 12, maximum=24)
         since = timezone.now() - timedelta(days=months * 31)
 
         viewer_rows = {
@@ -1236,7 +1283,7 @@ class AdminWithdrawalSummaryView(AdminBaseView):
     def get(self, request):
         from datetime import timedelta
 
-        months = _safe_int(request, 'months', 12)
+        months = _safe_int(request, 'months', 12, maximum=24)
         since = timezone.now() - timedelta(days=months * 31)
 
         def _by_status(status_filter):
