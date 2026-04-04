@@ -1,6 +1,8 @@
 from django.db import transaction
-from django.db.models import Sum
-from django.db.models.functions import Coalesce
+from django.db.models import Sum, Count, Q
+from django.db.models.functions import Coalesce, TruncMonth
+from django.utils import timezone
+from datetime import timedelta
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -127,6 +129,216 @@ class ProducerWalletView(ProducerBaseView):
     )
     def get(self, request):
         return Response(get_producer_wallet(request.user))
+
+
+class ProducerReportView(ProducerBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='My movies performance report',
+        description=(
+            'Returns the authenticated producer\'s wallet summary alongside per-movie aggregate stats: '
+            'view count, purchase count, total revenue, and the producer\'s 70% share. '
+            'Use `GET /producer/movies/<id>/purchases/` to page through individual purchase records.'
+        ),
+        responses={
+            200: inline_serializer(
+                name='ProducerReport',
+                fields={
+                    'wallet': inline_serializer(
+                        name='ProducerReportWallet',
+                        fields={
+                            'total_earnings': drf_serializers.IntegerField(),
+                            'wallet_balance': drf_serializers.IntegerField(),
+                            'pending_withdrawals': drf_serializers.IntegerField(),
+                            'total_withdrawn': drf_serializers.IntegerField(),
+                        },
+                    ),
+                    'movies': inline_serializer(
+                        name='ProducerReportMovie',
+                        fields={
+                            'id': drf_serializers.IntegerField(),
+                            'title': drf_serializers.CharField(),
+                            'price': drf_serializers.IntegerField(),
+                            'views': drf_serializers.IntegerField(),
+                            'release_date': drf_serializers.DateField(),
+                            'total_revenue': drf_serializers.IntegerField(help_text='Sum of completed payments (RWF)'),
+                            'purchase_count': drf_serializers.IntegerField(),
+                            'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Producer role required'),
+        },
+    )
+    def get(self, request):
+        wallet = get_producer_wallet(request.user)
+        movies = Movie.objects.filter(producer_profile=request.user).annotate(
+            total_revenue=Coalesce(
+                Sum('payments__amount', filter=Q(payments__status='Completed')), 0
+            ),
+            purchase_count=Count('payments', filter=Q(payments__status='Completed')),
+        ).order_by('-created_at')
+
+        movies_data = [
+            {
+                'id': movie.id,
+                'title': movie.title,
+                'price': movie.price,
+                'views': movie.views,
+                'release_date': movie.release_date,
+                'total_revenue': movie.total_revenue,
+                'purchase_count': movie.purchase_count,
+                'producer_share': (movie.total_revenue * 70) // 100,
+            }
+            for movie in movies
+        ]
+
+        return Response({
+            'wallet': wallet,
+            'movies': movies_data,
+        })
+
+
+class ProducerMoviePurchasesView(ProducerBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Paginated purchase history for one of my movies',
+        description=(
+            'Returns completed purchases for the given movie (must belong to the authenticated producer), '
+            'newest first. Buyer identity is not exposed.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                default=1,
+                description='Page number (20 results per page)',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='ProducerMoviePurchaseList',
+                fields={
+                    'page': drf_serializers.IntegerField(),
+                    'total_results': drf_serializers.IntegerField(),
+                    'total_pages': drf_serializers.IntegerField(),
+                    'results': inline_serializer(
+                        name='ProducerMoviePurchaseItem',
+                        fields={
+                            'amount': drf_serializers.IntegerField(),
+                            'status': drf_serializers.CharField(),
+                            'purchased_at': drf_serializers.DateTimeField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Producer role required'),
+            404: OpenApiResponse(description='Movie not found or not owned by this producer'),
+        },
+    )
+    def get(self, request, id):
+        try:
+            movie = Movie.objects.get(id=id, producer_profile=request.user)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        qs = Payment.objects.filter(movie=movie, status='Completed').order_by('-created_at')
+        page = _safe_page(request)
+        page_size = 20
+        start = (page - 1) * page_size
+        total = qs.count()
+
+        results = [
+            {'amount': p.amount, 'status': p.status, 'purchased_at': p.created_at}
+            for p in qs[start:start + page_size]
+        ]
+
+        return Response({
+            'page': page,
+            'total_results': total,
+            'total_pages': (total + page_size - 1) // page_size,
+            'results': results,
+        })
+
+
+class ProducerRevenueTrendView(ProducerBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='My monthly revenue trend',
+        description=(
+            'Returns month-by-month earnings for the authenticated producer over the last N months. '
+            '`producer_share` is 70% of `total_revenue` for each month. '
+            'Months with no sales are omitted.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='months',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                default=12,
+                description='How many months back to include (default 12)',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='ProducerRevenueTrend',
+                fields={
+                    'trend': inline_serializer(
+                        name='ProducerRevenueTrendItem',
+                        fields={
+                            'month': drf_serializers.DateTimeField(help_text='First day of the month (UTC)'),
+                            'total_revenue': drf_serializers.IntegerField(help_text='Gross revenue from purchases that month (RWF)'),
+                            'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
+                            'purchase_count': drf_serializers.IntegerField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Producer role required'),
+        },
+    )
+    def get(self, request):
+        try:
+            months = min(max(1, int(request.GET.get('months', 12))), 24)
+        except (TypeError, ValueError):
+            months = 12
+
+        since = timezone.now() - timedelta(days=months * 31)
+
+        rows = (
+            Payment.objects
+            .filter(
+                movie__producer_profile=request.user,
+                status='Completed',
+                created_at__gte=since,
+            )
+            .annotate(month=TruncMonth('created_at'))
+            .values('month')
+            .annotate(total_revenue=Sum('amount'), purchase_count=Count('id'))
+            .order_by('month')
+        )
+
+        trend = [
+            {
+                'month': row['month'],
+                'total_revenue': row['total_revenue'],
+                'producer_share': (row['total_revenue'] * 70) // 100,
+                'purchase_count': row['purchase_count'],
+            }
+            for row in rows
+        ]
+
+        return Response({'trend': trend})
 
 
 class ProducerWithdrawalsView(ProducerBaseView):
