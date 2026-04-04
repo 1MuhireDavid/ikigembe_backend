@@ -14,7 +14,7 @@ from drf_spectacular.utils import (
 )
 from drf_spectacular.types import OpenApiTypes
 from django.db.models import Sum, Count, Q
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, TruncMonth, TruncWeek
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -417,6 +417,131 @@ class AdminProducersListView(AdminBaseView):
         return Response(data)
 
 
+class AdminProducerReportView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary="Audit a producer's movie performance",
+        description=(
+            'Returns the producer\'s wallet summary and a per-movie breakdown. '
+            'Each movie lists every completed purchase with full buyer details '
+            '(name, phone, deposit ID) so admins can verify view counts against '
+            'real transactions and confirm the 70/30 commission split is accurate.'
+        ),
+        responses={
+            200: inline_serializer(
+                name='AdminProducerReport',
+                fields={
+                    'producer': inline_serializer(
+                        name='AdminProducerReportProfile',
+                        fields={
+                            'id': drf_serializers.IntegerField(),
+                            'name': drf_serializers.CharField(),
+                            'email': drf_serializers.EmailField(allow_null=True),
+                            'phone_number': drf_serializers.CharField(allow_null=True),
+                            'total_earnings': drf_serializers.IntegerField(),
+                            'balance': drf_serializers.IntegerField(),
+                            'pending_withdrawals': drf_serializers.IntegerField(),
+                            'total_withdrawn': drf_serializers.IntegerField(),
+                        },
+                    ),
+                    'movies': inline_serializer(
+                        name='AdminProducerReportMovie',
+                        fields={
+                            'id': drf_serializers.IntegerField(),
+                            'title': drf_serializers.CharField(),
+                            'price': drf_serializers.IntegerField(),
+                            'views': drf_serializers.IntegerField(),
+                            'release_date': drf_serializers.DateField(),
+                            'total_revenue': drf_serializers.IntegerField(help_text='Sum of completed payments (RWF)'),
+                            'purchase_count': drf_serializers.IntegerField(),
+                            'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
+                            'purchases': inline_serializer(
+                                name='AdminProducerReportPurchase',
+                                fields={
+                                    'payment_id': drf_serializers.IntegerField(),
+                                    'buyer_name': drf_serializers.CharField(),
+                                    'phone_number': drf_serializers.CharField(allow_null=True),
+                                    'amount': drf_serializers.IntegerField(),
+                                    'status': drf_serializers.CharField(),
+                                    'deposit_id': drf_serializers.CharField(allow_null=True),
+                                    'purchased_at': drf_serializers.DateTimeField(),
+                                },
+                                many=True,
+                            ),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+            404: OpenApiResponse(description='Producer not found'),
+        },
+    )
+    def get(self, request, user_id):
+        from collections import defaultdict
+
+        producer = get_object_or_404(User, id=user_id, role='Producer')
+        wallet = get_producer_wallet(producer)
+
+        movies = Movie.objects.filter(producer_profile=producer).order_by('-created_at')
+        movie_ids = list(movies.values_list('id', flat=True))
+
+        payments = (
+            Payment.objects
+            .filter(movie_id__in=movie_ids, status='Completed')
+            .select_related('user')
+            .order_by('-created_at')
+        )
+
+        payments_by_movie = defaultdict(list)
+        revenue_by_movie = defaultdict(int)
+        for p in payments:
+            payments_by_movie[p.movie_id].append(p)
+            revenue_by_movie[p.movie_id] += p.amount
+
+        movies_data = []
+        for movie in movies:
+            movie_payments = payments_by_movie[movie.id]
+            total_revenue = revenue_by_movie[movie.id]
+            movies_data.append({
+                'id': movie.id,
+                'title': movie.title,
+                'price': movie.price,
+                'views': movie.views,
+                'release_date': movie.release_date,
+                'total_revenue': total_revenue,
+                'purchase_count': len(movie_payments),
+                'producer_share': (total_revenue * 70) // 100,
+                'purchases': [
+                    {
+                        'payment_id': p.id,
+                        'buyer_name': p.user.full_name,
+                        'phone_number': p.phone_number,
+                        'amount': p.amount,
+                        'status': p.status,
+                        'deposit_id': p.deposit_id,
+                        'purchased_at': p.created_at,
+                    }
+                    for p in movie_payments
+                ],
+            })
+
+        return Response({
+            'producer': {
+                'id': producer.id,
+                'name': producer.full_name,
+                'email': producer.email,
+                'phone_number': producer.phone_number,
+                'total_earnings': wallet['total_earnings'],
+                'balance': wallet['wallet_balance'],
+                'pending_withdrawals': wallet['pending_withdrawals'],
+                'total_withdrawn': wallet['total_withdrawn'],
+            },
+            'movies': movies_data,
+        })
+
+
 class AdminProducerApproveView(AdminBaseView):
     @extend_schema(
         tags=[_TAG],
@@ -804,3 +929,353 @@ class AdminWithdrawalRejectView(AdminBaseView):
             'id': withdrawal.id,
             'status': withdrawal.status,
         })
+
+
+# ─────────────────────────────────────────────
+# Analytics Reports
+# ─────────────────────────────────────────────
+
+def _safe_int(request, param, default, minimum=1):
+    try:
+        return max(minimum, int(request.GET.get(param, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+class AdminRevenueTrendView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Platform revenue over time',
+        description=(
+            'Returns revenue grouped by month or week for the last N periods. '
+            'Each entry shows gross revenue, the 70% producer share, and the 30% platform commission. '
+            'Periods with no sales are omitted.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='period',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                enum=['monthly', 'weekly'],
+                default='monthly',
+                description='Grouping granularity',
+            ),
+            OpenApiParameter(
+                name='periods',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                default=12,
+                description='How many periods back to include (default 12)',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='AdminRevenueTrend',
+                fields={
+                    'period': drf_serializers.CharField(help_text='monthly or weekly'),
+                    'trend': inline_serializer(
+                        name='AdminRevenueTrendItem',
+                        fields={
+                            'period_start': drf_serializers.DateTimeField(),
+                            'total_revenue': drf_serializers.IntegerField(help_text='RWF'),
+                            'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
+                            'ikigembe_commission': drf_serializers.IntegerField(help_text='30% of total_revenue (RWF)'),
+                            'purchase_count': drf_serializers.IntegerField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        from datetime import timedelta
+
+        period = request.GET.get('period', 'monthly')
+        n = _safe_int(request, 'periods', 12)
+
+        if period == 'weekly':
+            trunc_fn = TruncWeek
+            since = timezone.now() - timedelta(weeks=n)
+        else:
+            period = 'monthly'
+            trunc_fn = TruncMonth
+            since = timezone.now() - timedelta(days=n * 31)
+
+        rows = (
+            Payment.objects
+            .filter(status='Completed', created_at__gte=since)
+            .annotate(period_start=trunc_fn('created_at'))
+            .values('period_start')
+            .annotate(total_revenue=Sum('amount'), purchase_count=Count('id'))
+            .order_by('period_start')
+        )
+
+        trend = []
+        for row in rows:
+            rev = row['total_revenue']
+            producer_share = (rev * 70) // 100
+            trend.append({
+                'period_start': row['period_start'],
+                'total_revenue': rev,
+                'producer_share': producer_share,
+                'ikigembe_commission': rev - producer_share,
+                'purchase_count': row['purchase_count'],
+            })
+
+        return Response({'period': period, 'trend': trend})
+
+
+class AdminTopMoviesView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Top movies by revenue or views',
+        description=(
+            'Returns the top N movies ranked by completed payment revenue or by raw view count. '
+            'Includes per-movie purchase count and producer name.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='sort',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                enum=['revenue', 'views'],
+                default='revenue',
+                description='Ranking metric',
+            ),
+            OpenApiParameter(
+                name='limit',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                default=10,
+                description='Number of results (default 10, max 50)',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='AdminTopMovies',
+                fields={
+                    'sort': drf_serializers.CharField(),
+                    'results': inline_serializer(
+                        name='AdminTopMovieItem',
+                        fields={
+                            'id': drf_serializers.IntegerField(),
+                            'title': drf_serializers.CharField(),
+                            'producer': drf_serializers.CharField(help_text='Producer full name'),
+                            'views': drf_serializers.IntegerField(),
+                            'purchase_count': drf_serializers.IntegerField(),
+                            'total_revenue': drf_serializers.IntegerField(help_text='Sum of completed payments (RWF)'),
+                            'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        sort = request.GET.get('sort', 'revenue')
+        limit = min(_safe_int(request, 'limit', 10), 50)
+
+        movies = Movie.objects.select_related('producer_profile').annotate(
+            total_revenue=Coalesce(
+                Sum('payments__amount', filter=Q(payments__status='Completed')), 0
+            ),
+            purchase_count=Count('payments', filter=Q(payments__status='Completed')),
+        )
+
+        if sort == 'views':
+            movies = movies.order_by('-views')
+        else:
+            sort = 'revenue'
+            movies = movies.order_by('-total_revenue')
+
+        results = []
+        for movie in movies[:limit]:
+            results.append({
+                'id': movie.id,
+                'title': movie.title,
+                'producer': movie.producer_profile.full_name if movie.producer_profile else 'Unknown',
+                'views': movie.views,
+                'purchase_count': movie.purchase_count,
+                'total_revenue': movie.total_revenue,
+                'producer_share': (movie.total_revenue * 70) // 100,
+            })
+
+        return Response({'sort': sort, 'results': results})
+
+
+class AdminUserGrowthView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='User registration growth over time',
+        description=(
+            'Returns new user registrations grouped by month for the last N months, '
+            'broken down by role (Viewer, Producer). Months with no registrations are omitted.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='months',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                default=12,
+                description='How many months back to include (default 12)',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='AdminUserGrowth',
+                fields={
+                    'trend': inline_serializer(
+                        name='AdminUserGrowthItem',
+                        fields={
+                            'month': drf_serializers.DateTimeField(),
+                            'viewers': drf_serializers.IntegerField(),
+                            'producers': drf_serializers.IntegerField(),
+                            'total': drf_serializers.IntegerField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        from datetime import timedelta
+
+        months = _safe_int(request, 'months', 12)
+        since = timezone.now() - timedelta(days=months * 31)
+
+        viewer_rows = {
+            row['month']: row['count']
+            for row in (
+                User.objects
+                .filter(role='Viewer', date_joined__gte=since)
+                .annotate(month=TruncMonth('date_joined'))
+                .values('month')
+                .annotate(count=Count('id'))
+            )
+        }
+
+        producer_rows = {
+            row['month']: row['count']
+            for row in (
+                User.objects
+                .filter(role='Producer', date_joined__gte=since)
+                .annotate(month=TruncMonth('date_joined'))
+                .values('month')
+                .annotate(count=Count('id'))
+            )
+        }
+
+        all_months = sorted(set(viewer_rows) | set(producer_rows))
+        trend = [
+            {
+                'month': m,
+                'viewers': viewer_rows.get(m, 0),
+                'producers': producer_rows.get(m, 0),
+                'total': viewer_rows.get(m, 0) + producer_rows.get(m, 0),
+            }
+            for m in all_months
+        ]
+
+        return Response({'trend': trend})
+
+
+class AdminWithdrawalSummaryView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Withdrawal payout summary by period',
+        description=(
+            'Returns monthly totals for withdrawal requests, broken down by status '
+            '(Completed, Rejected, Pending). Useful for tracking how much was actually '
+            'paid out to producers each month vs. rejected or still pending.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='months',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                default=12,
+                description='How many months back to include (default 12)',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='AdminWithdrawalSummary',
+                fields={
+                    'trend': inline_serializer(
+                        name='AdminWithdrawalSummaryItem',
+                        fields={
+                            'month': drf_serializers.DateTimeField(),
+                            'completed': drf_serializers.IntegerField(help_text='Total paid out (RWF)'),
+                            'rejected': drf_serializers.IntegerField(help_text='Total rejected (RWF)'),
+                            'pending': drf_serializers.IntegerField(help_text='Total still pending (RWF)'),
+                            'request_count': drf_serializers.IntegerField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        from datetime import timedelta
+
+        months = _safe_int(request, 'months', 12)
+        since = timezone.now() - timedelta(days=months * 31)
+
+        def _by_status(status_filter):
+            return {
+                row['month']: row['total']
+                for row in (
+                    WithdrawalRequest.objects
+                    .filter(status=status_filter, created_at__gte=since)
+                    .annotate(month=TruncMonth('created_at'))
+                    .values('month')
+                    .annotate(total=Sum('amount'))
+                )
+            }
+
+        completed_map = _by_status('Completed')
+        rejected_map = _by_status('Rejected')
+        pending_map = _by_status('Pending')
+
+        count_map = {
+            row['month']: row['count']
+            for row in (
+                WithdrawalRequest.objects
+                .filter(created_at__gte=since)
+                .annotate(month=TruncMonth('created_at'))
+                .values('month')
+                .annotate(count=Count('id'))
+            )
+        }
+
+        all_months = sorted(set(completed_map) | set(rejected_map) | set(pending_map))
+        trend = [
+            {
+                'month': m,
+                'completed': completed_map.get(m, 0),
+                'rejected': rejected_map.get(m, 0),
+                'pending': pending_map.get(m, 0),
+                'request_count': count_map.get(m, 0),
+            }
+            for m in all_months
+        ]
+
+        return Response({'trend': trend})
