@@ -283,29 +283,22 @@ class PawapayWebhookView(APIView):
         responses={200: OpenApiResponse(description='Acknowledged')}
     )
     def post(self, request):
-        # PawaPay sends a Bearer token in the Authorization header for webhook callbacks.
-        # This token is configured separately from the API key in the PawaPay dashboard
-        # (Settings → Callback Authentication Token). Fall back to PAWAPAY_API_KEY for
-        # deployments that haven't set a dedicated callback token yet.
-        callback_token = getattr(settings, 'PAWAPAY_CALLBACK_TOKEN', '') or settings.PAWAPAY_API_KEY
+        # Only verify the Authorization header if PAWAPAY_CALLBACK_TOKEN is explicitly set.
+        # If no callback token is configured in the PawaPay dashboard, PawaPay sends
+        # webhooks with no Authorization header — skip the check in that case.
+        callback_token = getattr(settings, 'PAWAPAY_CALLBACK_TOKEN', '')
 
         if callback_token:
             auth_header = request.headers.get('Authorization', '')
             expected = f'Bearer {callback_token}'
             if not secrets.compare_digest(auth_header, expected):
-                # Log a masked version of the received header to aid debugging.
                 masked = auth_header[:12] + '…' if len(auth_header) > 12 else repr(auth_header)
                 logger.warning(
                     'PawaPay webhook: Authorization mismatch — received %s. '
-                    'Check PAWAPAY_CALLBACK_TOKEN matches the token configured in the PawaPay dashboard.',
+                    'Check PAWAPAY_CALLBACK_TOKEN matches the PawaPay dashboard callback token.',
                     masked,
                 )
                 return Response(status=status.HTTP_200_OK)
-        else:
-            logger.warning(
-                'PawaPay webhook: no callback token configured (PAWAPAY_CALLBACK_TOKEN / PAWAPAY_API_KEY). '
-                'Processing callback without authentication.'
-            )
 
         data = request.data
         pawapay_status = data.get('status', '').upper()
