@@ -1,3 +1,7 @@
+import secrets
+from datetime import timedelta
+
+from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.utils import timezone
@@ -60,3 +64,66 @@ class User(AbstractBaseUser, PermissionsMixin):
     @property
     def full_name(self):
         return f'{self.first_name} {self.last_name}'.strip()
+
+
+class AdminAuditLog(models.Model):
+    ACTION_CHOICES = [
+        ('suspend_user',        'Suspend/Activate User'),
+        ('delete_user',         'Delete User'),
+        ('approve_producer',    'Approve Producer'),
+        ('suspend_producer',    'Suspend Producer'),
+        ('create_producer',     'Create Producer'),
+        ('approve_withdrawal',   'Approve Withdrawal'),
+        ('complete_withdrawal',  'Complete Withdrawal'),
+        ('reject_withdrawal',    'Reject Withdrawal'),
+        ('reset_user_password',  'Reset User Password'),
+    ]
+
+    admin               = models.ForeignKey(
+                            settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                            null=True, related_name='audit_logs')
+    action              = models.CharField(max_length=30, choices=ACTION_CHOICES)
+    target_user         = models.ForeignKey(
+                            settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                            null=True, blank=True, related_name='audit_targets')
+    target_withdrawal   = models.ForeignKey(
+                            'payments.WithdrawalRequest', on_delete=models.SET_NULL,
+                            null=True, blank=True)
+    detail              = models.JSONField(default=dict)
+    ip_address          = models.GenericIPAddressField(null=True, blank=True)
+    timestamp           = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-timestamp']
+
+    def __str__(self):
+        admin_email = self.admin.email if self.admin else 'unknown'
+        return f'{admin_email} → {self.action} at {self.timestamp}'
+
+
+class PasswordResetToken(models.Model):
+    """Single-use token for password recovery. Valid for 1 hour."""
+    EXPIRY_HOURS = 1
+
+    user       = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                   related_name='password_reset_tokens')
+    token      = models.CharField(max_length=64, unique=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    used       = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    @classmethod
+    def make(cls, user):
+        """Invalidate previous tokens and create a fresh one."""
+        cls.objects.filter(user=user, used=False).update(used=True)
+        return cls.objects.create(user=user, token=secrets.token_urlsafe(48))
+
+    def is_valid(self):
+        if self.used:
+            return False
+        return timezone.now() < self.created_at + timedelta(hours=self.EXPIRY_HOURS)
+
+    def __str__(self):
+        return f'reset token for {self.user} (used={self.used})'

@@ -179,6 +179,49 @@ class RefreshSerializer(serializers.Serializer):
         help_text="The refresh token obtained during login or registration"
     )
 
+class ProfileUpdateSerializer(serializers.ModelSerializer):
+    """Allow a user to update their own profile fields."""
+    email = serializers.EmailField(required=False, allow_null=True, allow_blank=True)
+    phone_number = serializers.CharField(required=False, allow_null=True, allow_blank=True, max_length=20)
+    first_name = serializers.CharField(required=False, allow_blank=True, max_length=150)
+    last_name = serializers.CharField(required=False, allow_blank=True, max_length=150)
+    avatar_url = serializers.URLField(required=False, allow_null=True, allow_blank=True)
+
+    class Meta:
+        model = User
+        fields = ['first_name', 'last_name', 'email', 'phone_number', 'avatar_url']
+
+    def validate_email(self, value):
+        if not value:
+            return None
+        value = value.lower().strip()
+        qs = User.objects.filter(email=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError('A user with this email already exists.')
+        return value
+
+    def validate_phone_number(self, value):
+        if not value:
+            return None
+        value = value.strip()
+        qs = User.objects.filter(phone_number=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError('A user with this phone number already exists.')
+        return value
+
+    def validate(self, attrs):
+        # Ensure at least one contact method remains after update
+        email = attrs.get('email', self.instance.email if self.instance else None)
+        phone = attrs.get('phone_number', self.instance.phone_number if self.instance else None)
+        if not email and not phone:
+            raise serializers.ValidationError('At least one of email or phone number is required.')
+        return attrs
+
+
 class AdminCreateProducerSerializer(serializers.ModelSerializer):
     password = serializers.CharField(
         write_only=True,

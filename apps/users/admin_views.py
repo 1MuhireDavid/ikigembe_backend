@@ -33,6 +33,22 @@ logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
+
+def _log_admin_action(request, action, detail=None, target_user=None, target_withdrawal=None):
+    """Persist an audit trail entry for every sensitive admin action."""
+    from apps.users.models import AdminAuditLog
+    x_forwarded = request.META.get('HTTP_X_FORWARDED_FOR')
+    ip = x_forwarded.split(',')[0].strip() if x_forwarded else request.META.get('REMOTE_ADDR')
+    AdminAuditLog.objects.create(
+        admin=request.user,
+        action=action,
+        target_user=target_user,
+        target_withdrawal=target_withdrawal,
+        detail=detail or {},
+        ip_address=ip,
+    )
+    logger.info('Admin %s performed %s | detail=%s', request.user.email, action, detail)
+
 _TAG = 'Admin Dashboard'
 
 
@@ -299,9 +315,12 @@ class AdminUserSuspendView(AdminBaseView):
         if user.role == 'Admin':
             return Response({'error': 'Cannot suspend another Admin'}, status=status.HTTP_400_BAD_REQUEST)
 
+        was_active = user.is_active
         user.is_active = not user.is_active
         user.save(update_fields=['is_active'])
         state = "activated" if user.is_active else "suspended"
+        _log_admin_action(request, 'suspend_user', target_user=user,
+                          detail={'was_active': was_active, 'now_active': user.is_active, 'role': user.role})
         return Response({'message': f'User {state} successfully', 'is_active': user.is_active})
 
 
@@ -322,6 +341,8 @@ class AdminUserDeleteView(AdminBaseView):
         user = get_object_or_404(User, id=user_id)
         if user.role == 'Admin':
             return Response({'error': 'Cannot delete an Admin'}, status=status.HTTP_400_BAD_REQUEST)
+        _log_admin_action(request, 'delete_user',
+                          detail={'deleted_email': user.email, 'deleted_phone': user.phone_number, 'deleted_role': user.role})
         user.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -441,6 +462,8 @@ class AdminProducerApproveView(AdminBaseView):
 
         producer.is_active = True
         producer.save(update_fields=['is_active'])
+        _log_admin_action(request, 'approve_producer', target_user=producer,
+                          detail={'producer_email': producer.email, 'producer_phone': producer.phone_number})
         return Response({'message': 'Producer approved successfully'})
 
 
@@ -464,6 +487,8 @@ class AdminProducerSuspendView(AdminBaseView):
         producer = get_object_or_404(User, id=user_id, role='Producer')
         producer.is_active = False
         producer.save(update_fields=['is_active'])
+        _log_admin_action(request, 'suspend_producer', target_user=producer,
+                          detail={'producer_email': producer.email, 'producer_phone': producer.phone_number})
         return Response({'message': 'Producer suspended successfully'})
 
 
@@ -527,6 +552,8 @@ class AdminCreateProducerView(AdminBaseView):
             role='Producer',
             is_active=True,
         )
+        _log_admin_action(request, 'create_producer', target_user=user,
+                          detail={'email': user.email, 'phone': user.phone_number})
         return Response({
             'id': user.id,
             'email': user.email,
@@ -635,6 +662,9 @@ class AdminWithdrawalApproveView(AdminBaseView):
         withdrawal.processed_at = timezone.now()
         withdrawal.save(update_fields=['status', 'processed_at'])
         send_withdrawal_status_email(withdrawal)
+        _log_admin_action(request, 'approve_withdrawal', target_withdrawal=withdrawal,
+                          detail={'producer': withdrawal.producer.email, 'amount': str(withdrawal.amount),
+                                  'payment_method': withdrawal.payment_method})
 
         return Response({
             'message': 'Withdrawal approved successfully.',
@@ -692,6 +722,9 @@ class AdminWithdrawalCompleteView(AdminBaseView):
             withdrawal.processed_at = timezone.now()
             withdrawal.save(update_fields=['status', 'processed_at'])
             send_withdrawal_status_email(withdrawal)
+            _log_admin_action(request, 'complete_withdrawal', target_withdrawal=withdrawal,
+                              detail={'producer': withdrawal.producer.email, 'amount': str(withdrawal.amount),
+                                      'payment_method': 'Bank'})
             return Response({
                 'message': 'Withdrawal marked as completed.',
                 'id': withdrawal.id,
@@ -753,6 +786,9 @@ class AdminWithdrawalCompleteView(AdminBaseView):
         withdrawal.status = 'Processing'
         withdrawal.processed_at = timezone.now()
         withdrawal.save(update_fields=['payout_id', 'status', 'processed_at'])
+        _log_admin_action(request, 'complete_withdrawal', target_withdrawal=withdrawal,
+                          detail={'producer': withdrawal.producer.email, 'amount': str(withdrawal.amount),
+                                  'payment_method': 'MoMo', 'payout_id': payout_id})
 
         return Response({
             'message': 'MoMo payout initiated. Status will update to Completed once confirmed by PawaPay.',
@@ -798,9 +834,149 @@ class AdminWithdrawalRejectView(AdminBaseView):
         withdrawal.processed_at = timezone.now()
         withdrawal.save(update_fields=['status', 'processed_at'])
         send_withdrawal_status_email(withdrawal)
+        _log_admin_action(request, 'reject_withdrawal', target_withdrawal=withdrawal,
+                          detail={'producer': withdrawal.producer.email, 'amount': str(withdrawal.amount),
+                                  'reason': request.data.get('reason', '')})
 
         return Response({
             'message': 'Withdrawal rejected.',
             'id': withdrawal.id,
             'status': withdrawal.status,
+        })
+
+
+# ─────────────────────────────────────────────
+# Admin Audit Log
+# ─────────────────────────────────────────────
+
+class AdminAuditLogView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Admin activity audit log',
+        description=(
+            'Returns a chronological record of all sensitive admin actions. '
+            'Filter by action type with `?action=<action>`. '
+            'Up to 200 most recent entries are returned.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='action',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                enum=[
+                    'suspend_user', 'delete_user', 'approve_producer', 'suspend_producer',
+                    'create_producer', 'approve_withdrawal', 'complete_withdrawal', 'reject_withdrawal',
+                    'reset_user_password',
+                ],
+                description='Filter by action type',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='AuditLogResponse',
+                fields={
+                    'results': inline_serializer(
+                        name='AuditLogEntry',
+                        fields={
+                            'id': drf_serializers.IntegerField(),
+                            'admin': drf_serializers.EmailField(allow_null=True),
+                            'action': drf_serializers.CharField(),
+                            'target_user': drf_serializers.EmailField(allow_null=True),
+                            'target_withdrawal_id': drf_serializers.IntegerField(allow_null=True),
+                            'detail': drf_serializers.DictField(),
+                            'ip_address': drf_serializers.CharField(allow_null=True),
+                            'timestamp': drf_serializers.DateTimeField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        from apps.users.models import AdminAuditLog
+        logs = AdminAuditLog.objects.select_related('admin', 'target_user')
+        action_filter = request.query_params.get('action')
+        if action_filter:
+            logs = logs.filter(action=action_filter)
+        data = [
+            {
+                'id': l.id,
+                'admin': l.admin.email if l.admin else None,
+                'action': l.action,
+                'target_user': l.target_user.email if l.target_user else None,
+                'target_withdrawal_id': l.target_withdrawal_id,
+                'detail': l.detail,
+                'ip_address': l.ip_address,
+                'timestamp': l.timestamp,
+            }
+            for l in logs[:200]
+        ]
+        return Response({'results': data})
+
+
+# ─────────────────────────────────────────────
+# Admin: Force-reset a user's password
+# ─────────────────────────────────────────────
+
+class AdminUserResetPasswordView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Generate a temporary password for a user',
+        description=(
+            'Generates a secure temporary password for the given user account and returns it once. '
+            'Use this for phone-only accounts that cannot reset via email. '
+            'The admin should share this password with the user and ask them to change it immediately. '
+            'This action is recorded in the audit log.'
+        ),
+        request=None,
+        responses={
+            200: inline_serializer(
+                name='ResetPasswordAdminResponse',
+                fields={
+                    'message': drf_serializers.CharField(),
+                    'temporary_password': drf_serializers.CharField(
+                        help_text='Share this with the user — it is shown only once'
+                    ),
+                    'user_email': drf_serializers.EmailField(allow_null=True),
+                    'user_phone': drf_serializers.CharField(allow_null=True),
+                },
+            ),
+            400: OpenApiResponse(description='Cannot reset password for an Admin account'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+            404: OpenApiResponse(description='User not found'),
+        },
+    )
+    def post(self, request, user_id):
+        user = get_object_or_404(User, id=user_id)
+        if user.role == 'Admin':
+            return Response(
+                {'error': 'Cannot reset password for an Admin account.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        temp_password = secrets.token_urlsafe(10)
+        user.set_password(temp_password)
+        # Rotate session key so all existing JWTs are immediately invalidated
+        user.active_session_key = str(uuid.uuid4())
+        user.save(update_fields=['password', 'active_session_key'])
+
+        _log_admin_action(
+            request, 'reset_user_password', target_user=user,
+            detail={
+                'user_email': user.email,
+                'user_phone': user.phone_number,
+                'user_role': user.role,
+            },
+        )
+
+        return Response({
+            'message': 'Temporary password generated. Share it with the user and ask them to change it immediately.',
+            'temporary_password': temp_password,
+            'user_email': user.email,
+            'user_phone': user.phone_number,
         })
