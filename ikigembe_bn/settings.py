@@ -289,8 +289,11 @@ HLS_SEGMENT_DURATION = 6
 HLS_TEMP_DIR = BASE_DIR / 'tmp' / 'hls'
 
 # PawaPay
-PAWAPAY_API_KEY = os.getenv('PAWAPAY_API_KEY', '')
+PAWAPAY_API_KEY = os.getenv('PAWAPAY_API_KEY', '').strip()
 PAWAPAY_BASE_URL = os.getenv('PAWAPAY_BASE_URL', 'https://api.sandbox.pawapay.cloud')
+# Optional dedicated callback token (PawaPay dashboard → Settings → Callback Authentication Token).
+# In sandbox, PawaPay reuses the API key — leave this unset and the API key is used instead.
+PAWAPAY_CALLBACK_TOKEN = os.getenv('PAWAPAY_CALLBACK_TOKEN', '').strip()
 
 # Email
 # Dev default: print emails to console. Set EMAIL_BACKEND in .env for production SMTP.

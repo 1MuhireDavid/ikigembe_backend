@@ -109,7 +109,7 @@ class DiscoverMoviesView(APIView):
         movies = movies.order_by(order_map.get(sort_by, '-views'))
 
         page, total, movies_page = _paginate(movies, request)
-        serializer = MovieSerializer(movies_page, many=True)
+        serializer = MovieSerializer(movies_page, many=True, context={'request': request})
 
         return Response({
             'page': page,
@@ -160,7 +160,7 @@ class MovieSearchView(APIView):
         page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
-            'results': MovieSerializer(movies_page, many=True).data,
+            'results': MovieSerializer(movies_page, many=True, context={'request': request}).data,
             'total_results': total,
             'total_pages': (total + 19) // 20,
         })
@@ -187,7 +187,7 @@ class PopularMoviesView(APIView):
         page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
-            'results': MovieSerializer(movies_page, many=True).data,
+            'results': MovieSerializer(movies_page, many=True, context={'request': request}).data,
             'total_results': total,
             'total_pages': (total + 19) // 20,
         })
@@ -214,7 +214,7 @@ class NowPlayingMoviesView(APIView):
         page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
-            'results': MovieSerializer(movies_page, many=True).data,
+            'results': MovieSerializer(movies_page, many=True, context={'request': request}).data,
             'total_results': total,
             'total_pages': (total + 19) // 20,
         })
@@ -241,7 +241,7 @@ class TopRatedMoviesView(APIView):
         page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
-            'results': MovieSerializer(movies_page, many=True).data,
+            'results': MovieSerializer(movies_page, many=True, context={'request': request}).data,
             'total_results': total,
             'total_pages': (total + 19) // 20,
         })
@@ -269,7 +269,7 @@ class UpcomingMoviesView(APIView):
         page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
-            'results': MovieSerializer(movies_page, many=True).data,
+            'results': MovieSerializer(movies_page, many=True, context={'request': request}).data,
             'total_results': total,
             'total_pages': (total + 19) // 20,
         })
@@ -311,7 +311,7 @@ class MovieDetailView(APIView):
         if not movie.is_active and not is_own_movie:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        return Response(MovieDetailSerializer(movie).data)
+        return Response(MovieDetailSerializer(movie, context={'request': request}).data)
 
 
 # ─────────────────────────────────────────────
@@ -642,7 +642,7 @@ class MovieCreateView(APIView):
             if movie.video_file:
                 from .transcoding import start_hls_transcode
                 start_hls_transcode(movie.id)
-            return Response(MovieDetailSerializer(movie).data, status=status.HTTP_201_CREATED)
+            return Response(MovieDetailSerializer(movie, context={'request': request}).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -688,7 +688,7 @@ class MovieUpdateView(APIView):
             if 'video_file' in request.data and movie.video_file:
                 from .transcoding import start_hls_transcode
                 start_hls_transcode(movie.id, force=True)
-            return Response(MovieDetailSerializer(movie).data)
+            return Response(MovieDetailSerializer(movie, context={'request': request}).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -1236,7 +1236,7 @@ class MoviesByProducerView(APIView):
                 'name': producer.full_name or producer.email or f'Producer #{producer.id}',
             },
             'page': page,
-            'results': MovieSerializer(movies_page, many=True).data,
+            'results': MovieSerializer(movies_page, many=True, context={'request': request}).data,
             'total_results': total,
             'total_pages': (total + 19) // 20,
         })
