@@ -15,6 +15,8 @@ from .admin_views import (
     AdminWithdrawalApproveView,
     AdminWithdrawalCompleteView,
     AdminWithdrawalRejectView,
+    AdminAuditLogView,
+    AdminUserResetPasswordView,
     AdminRevenueTrendView,
     AdminTopMoviesView,
     AdminUserGrowthView,
@@ -53,4 +55,10 @@ urlpatterns = [
     path('withdrawals/<int:withdrawal_id>/approve/', AdminWithdrawalApproveView.as_view(), name='admin-withdrawal-approve'),
     path('withdrawals/<int:withdrawal_id>/complete/', AdminWithdrawalCompleteView.as_view(), name='admin-withdrawal-complete'),
     path('withdrawals/<int:withdrawal_id>/reject/', AdminWithdrawalRejectView.as_view(), name='admin-withdrawal-reject'),
+
+    # Audit Log
+    path('audit-logs/', AdminAuditLogView.as_view(), name='admin-audit-logs'),
+
+    # Password reset (for phone-only accounts)
+    path('users/<int:user_id>/reset-password/', AdminUserResetPasswordView.as_view(), name='admin-user-reset-password'),
 ]

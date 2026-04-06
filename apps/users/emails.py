@@ -100,6 +100,61 @@ def _send(subject: str, plain: str, html: str, to: str) -> None:
 # Welcome email
 # ---------------------------------------------------------------------------
 
+def send_password_reset_email(user, token: str) -> None:
+    """Send a password-reset link to the user's email address."""
+    if not user.email:
+        return
+
+    name = user.first_name or 'there'
+    reset_url = f'https://ikigembe-film.vercel.app/reset-password?token={token}'
+
+    plain = (
+        f'Hi {name},\n\n'
+        f'We received a request to reset your Ikigembe password.\n\n'
+        f'Click the link below to set a new password (valid for 1 hour):\n'
+        f'{reset_url}\n\n'
+        f'If you did not request this, ignore this email — your account is safe.\n\n'
+        f'— The Ikigembe Team'
+    )
+
+    body_html = f"""
+        <p style="font-size:22px;font-weight:bold;margin:0 0 6px;color:{_DARK};">
+          Reset your password
+        </p>
+        <p style="margin:0 0 4px;color:{_GOLD};font-size:12px;letter-spacing:2px;
+                  text-transform:uppercase;font-family:Arial,sans-serif;">
+          Secure account recovery
+        </p>
+        <div style="width:48px;height:2px;background:{_GOLD};margin:16px 0 24px;"></div>
+
+        <p style="margin:0 0 16px;">Hi {name},</p>
+        <p style="margin:0 0 16px;">
+          We received a request to reset the password for your Ikigembe account.
+          Click the button below to choose a new password. This link is valid for
+          <strong>1 hour</strong>.
+        </p>
+
+        {_cta_button('Reset My Password', reset_url)}
+
+        <p style="margin:24px 0 0;color:#777777;font-size:13px;
+                  font-family:Arial,sans-serif;">
+          If you did not request a password reset, you can safely ignore this email.
+          Your account will remain unchanged.
+        </p>
+    """
+
+    try:
+        _send(
+            subject='Reset your Ikigembe password',
+            plain=plain,
+            html=_base_html('Reset your password', body_html),
+            to=user.email,
+        )
+        logger.info('Password reset email sent to %s', user.email)
+    except Exception:
+        logger.exception('Failed to send password reset email to %s', user.email)
+
+
 def send_welcome_email(user) -> None:
     """Send a welcome email to a newly registered user."""
     if not user.email:
