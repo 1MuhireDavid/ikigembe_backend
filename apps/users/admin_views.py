@@ -1039,6 +1039,55 @@ class AdminAuditLogView(AdminBaseView):
                     'reset_user_password',
                 ],
                 description='Filter by action type',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='AuditLogResponse',
+                fields={
+                    'results': inline_serializer(
+                        name='AuditLogEntry',
+                        fields={
+                            'id': drf_serializers.IntegerField(),
+                            'admin': drf_serializers.EmailField(allow_null=True),
+                            'action': drf_serializers.CharField(),
+                            'target_user': drf_serializers.EmailField(allow_null=True),
+                            'target_withdrawal_id': drf_serializers.IntegerField(allow_null=True),
+                            'detail': drf_serializers.DictField(),
+                            'ip_address': drf_serializers.CharField(allow_null=True),
+                            'timestamp': drf_serializers.DateTimeField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        from apps.users.models import AdminAuditLog
+        logs = AdminAuditLog.objects.select_related('admin', 'target_user').order_by('-timestamp')
+        action_filter = request.query_params.get('action')
+        if action_filter:
+            logs = logs.filter(action=action_filter)
+        data = [
+            {
+                'id': l.id,
+                'admin': l.admin.email if l.admin else None,
+                'action': l.action,
+                'target_user': l.target_user.email if l.target_user else None,
+                'target_withdrawal_id': l.target_withdrawal_id,
+                'detail': l.detail,
+                'ip_address': l.ip_address,
+                'timestamp': l.timestamp,
+            }
+            for l in logs[:200]
+        ]
+        return Response({'results': data})
+
+
+# ─────────────────────────────────────────────
 # Analytics Reports
 # ─────────────────────────────────────────────
 
@@ -1082,19 +1131,6 @@ class AdminRevenueTrendView(AdminBaseView):
         ],
         responses={
             200: inline_serializer(
-                name='AuditLogResponse',
-                fields={
-                    'results': inline_serializer(
-                        name='AuditLogEntry',
-                        fields={
-                            'id': drf_serializers.IntegerField(),
-                            'admin': drf_serializers.EmailField(allow_null=True),
-                            'action': drf_serializers.CharField(),
-                            'target_user': drf_serializers.EmailField(allow_null=True),
-                            'target_withdrawal_id': drf_serializers.IntegerField(allow_null=True),
-                            'detail': drf_serializers.DictField(),
-                            'ip_address': drf_serializers.CharField(allow_null=True),
-                            'timestamp': drf_serializers.DateTimeField(),
                 name='AdminRevenueTrend',
                 fields={
                     'period': drf_serializers.CharField(help_text='monthly or weekly'),
@@ -1275,25 +1311,45 @@ class AdminUserGrowthView(AdminBaseView):
         },
     )
     def get(self, request):
-        from apps.users.models import AdminAuditLog
-        logs = AdminAuditLog.objects.select_related('admin', 'target_user')
-        action_filter = request.query_params.get('action')
-        if action_filter:
-            logs = logs.filter(action=action_filter)
-        data = [
+        from datetime import timedelta
+
+        months = _safe_int(request, 'months', 12, maximum=24)
+        since = timezone.now() - timedelta(days=months * 31)
+
+        viewer_rows = {
+            row['month']: row['count']
+            for row in (
+                User.objects
+                .filter(role='Viewer', date_joined__gte=since)
+                .annotate(month=TruncMonth('date_joined'))
+                .values('month')
+                .annotate(count=Count('id'))
+            )
+        }
+
+        producer_rows = {
+            row['month']: row['count']
+            for row in (
+                User.objects
+                .filter(role='Producer', date_joined__gte=since)
+                .annotate(month=TruncMonth('date_joined'))
+                .values('month')
+                .annotate(count=Count('id'))
+            )
+        }
+
+        all_months = sorted(set(viewer_rows) | set(producer_rows))
+        trend = [
             {
-                'id': l.id,
-                'admin': l.admin.email if l.admin else None,
-                'action': l.action,
-                'target_user': l.target_user.email if l.target_user else None,
-                'target_withdrawal_id': l.target_withdrawal_id,
-                'detail': l.detail,
-                'ip_address': l.ip_address,
-                'timestamp': l.timestamp,
+                'month': m,
+                'viewers': viewer_rows.get(m, 0),
+                'producers': producer_rows.get(m, 0),
+                'total': viewer_rows.get(m, 0) + producer_rows.get(m, 0),
             }
-            for l in logs[:200]
+            for m in all_months
         ]
-        return Response({'results': data})
+
+        return Response({'trend': trend})
 
 
 # ─────────────────────────────────────────────
@@ -1358,45 +1414,6 @@ class AdminUserResetPasswordView(AdminBaseView):
             'user_email': user.email,
             'user_phone': user.phone_number,
         })
-        from datetime import timedelta
-
-        months = _safe_int(request, 'months', 12, maximum=24)
-        since = timezone.now() - timedelta(days=months * 31)
-
-        viewer_rows = {
-            row['month']: row['count']
-            for row in (
-                User.objects
-                .filter(role='Viewer', date_joined__gte=since)
-                .annotate(month=TruncMonth('date_joined'))
-                .values('month')
-                .annotate(count=Count('id'))
-            )
-        }
-
-        producer_rows = {
-            row['month']: row['count']
-            for row in (
-                User.objects
-                .filter(role='Producer', date_joined__gte=since)
-                .annotate(month=TruncMonth('date_joined'))
-                .values('month')
-                .annotate(count=Count('id'))
-            )
-        }
-
-        all_months = sorted(set(viewer_rows) | set(producer_rows))
-        trend = [
-            {
-                'month': m,
-                'viewers': viewer_rows.get(m, 0),
-                'producers': producer_rows.get(m, 0),
-                'total': viewer_rows.get(m, 0) + producer_rows.get(m, 0),
-            }
-            for m in all_months
-        ]
-
-        return Response({'trend': trend})
 
 
 class AdminWithdrawalSummaryView(AdminBaseView):
