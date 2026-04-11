@@ -13,11 +13,11 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='user',
             name='address',
-            field=models.CharField(blank=True, default='', max_length=255),
+            field=models.CharField(blank=True, default='', max_length=255, null=True),
         ),
         migrations.AddField(
             model_name='user',
             name='copyright_code',
-            field=models.CharField(blank=True, default='', max_length=100),
+            field=models.CharField(blank=True, default='', max_length=100, null=True),
         ),
     ]

@@ -14,7 +14,7 @@ from drf_spectacular.utils import (
 )
 from drf_spectacular.types import OpenApiTypes
 from django.db.models import Sum, Count, Q
-from django.db.models.functions import Coalesce, TruncDate, TruncMonth, TruncWeek, TruncYear
+from django.db.models.functions import Coalesce, TruncDay, TruncMonth, TruncWeek, TruncYear
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -253,7 +253,9 @@ class AdminViewerDetailView(AdminBaseView):
         summary='Full viewer details (dispute / support use only)',
         description=(
             'Returns personal contact details for a specific viewer. '
-            'This endpoint should only be accessed when investigating a payment dispute or handling a support request.'
+            'Access is logged in the audit trail. '
+            'This endpoint should only be accessed when investigating a payment dispute or handling a support request. '
+            'Full URL: GET /api/admin/dashboard/viewers/<id>/'
         ),
         responses={
             200: inline_serializer(
@@ -275,14 +277,22 @@ class AdminViewerDetailView(AdminBaseView):
         },
     )
     def get(self, request, user_id):
-        viewer = get_object_or_404(User, id=user_id, role='Viewer')
-        viewer = User.objects.filter(id=user_id, role='Viewer').annotate(
-            movies_watched=Count('payments', filter=Q(payments__status='Completed')),
-            total_paid_rwf=Coalesce(Sum('payments__amount', filter=Q(payments__status='Completed')), 0),
-        ).first()
+        viewer = (
+            User.objects
+            .filter(id=user_id, role='Viewer')
+            .annotate(
+                movies_watched=Count('payments', filter=Q(payments__status='Completed')),
+                total_paid_rwf=Coalesce(Sum('payments__amount', filter=Q(payments__status='Completed')), 0),
+            )
+            .first()
+        )
         if not viewer:
             from rest_framework.exceptions import NotFound
             raise NotFound('Viewer not found.')
+        _log_admin_action(
+            request, 'view_viewer_pii', target_user=viewer,
+            detail={'viewer_id': viewer.id, 'reason': 'dispute/support access'},
+        )
         return Response({
             'id': viewer.id,
             'name': viewer.full_name,
@@ -1266,7 +1276,7 @@ class AdminRevenueTrendView(AdminBaseView):
 
         if period == 'daily':
             n = _safe_int(request, 'periods', 30, maximum=90)
-            trunc_fn = TruncDate
+            trunc_fn = TruncDay
             since = timezone.now() - timedelta(days=n)
         elif period == 'weekly':
             n = _safe_int(request, 'periods', 12, maximum=52)
