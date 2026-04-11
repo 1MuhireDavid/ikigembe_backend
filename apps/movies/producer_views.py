@@ -25,6 +25,7 @@ def _safe_page(request):
         return 1
 
 _TAG = 'Producer Dashboard'
+_REPORTS_TAG = 'Producer Reports'
 
 
 class ProducerBaseView(APIView):
@@ -135,7 +136,7 @@ class ProducerWalletView(ProducerBaseView):
 
 class ProducerReportView(ProducerBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary='My movies performance report',
         description=(
             'Returns the authenticated producer\'s wallet summary alongside per-movie aggregate stats: '
@@ -206,7 +207,7 @@ class ProducerReportView(ProducerBaseView):
 
 class ProducerMoviePurchasesView(ProducerBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary='Paginated purchase history for one of my movies',
         description=(
             'Returns completed purchases for the given movie (must belong to the authenticated producer), '
@@ -272,7 +273,7 @@ class ProducerMoviePurchasesView(ProducerBaseView):
 
 class ProducerRevenueTrendView(ProducerBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary='My monthly revenue trend',
         description=(
             'Returns month-by-month earnings for the authenticated producer over the last N months. '
@@ -440,7 +441,7 @@ class ProducerWithdrawalsView(ProducerBaseView):
 
 class ProducerMovieAnalyticsView(ProducerBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary='Analytics for one of my movies',
         description=(
             'Returns view count, revenue breakdown (gross / 30% commission / 70% earnings), '
@@ -527,7 +528,7 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
 
 class ProducerEarningsReportView(ProducerBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary='Earnings report by period',
         description=(
             'Returns earnings grouped by day (last 30 days), week (last 12 weeks), '
@@ -614,7 +615,7 @@ class ProducerEarningsReportView(ProducerBaseView):
 
 class ProducerTransactionHistoryView(ProducerBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary='My transaction history',
         description=(
             'Returns two DB-paginated sections: completed incoming payments and all withdrawal '
