@@ -3,6 +3,7 @@ from .admin_views import (
     AdminDashboardOverviewView,
     AdminTransactionHistoryView,
     AdminViewersListView,
+    AdminViewerDetailView,
     AdminViewerPaymentsView,
     AdminUserSuspendView,
     AdminUserDeleteView,
@@ -30,6 +31,7 @@ urlpatterns = [
     
     # Viewers
     path('viewers/', AdminViewersListView.as_view(), name='admin-viewers-list'),
+    path('viewers/<int:user_id>/', AdminViewerDetailView.as_view(), name='admin-viewer-detail'),
     path('viewers/<int:user_id>/payments/', AdminViewerPaymentsView.as_view(), name='admin-viewer-payments'),
     
     # Generic User Actions (suspend works for both Viewer and Producer)

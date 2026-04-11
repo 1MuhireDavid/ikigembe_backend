@@ -25,6 +25,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     last_name = models.CharField(max_length=150, blank=True)
 
 
+    address = models.CharField(max_length=255, blank=True, null=True, default='')
+    copyright_code = models.CharField(max_length=100, blank=True, null=True, default='')
+
     google_id = models.CharField(max_length=255, unique=True, null=True, blank=True, db_index=True)
     avatar_url = models.URLField(max_length=500, blank=True, null=True)
 
@@ -77,6 +80,7 @@ class AdminAuditLog(models.Model):
         ('complete_withdrawal',  'Complete Withdrawal'),
         ('reject_withdrawal',    'Reject Withdrawal'),
         ('reset_user_password',  'Reset User Password'),
+        ('view_viewer_pii',      'View Viewer PII (dispute/support)'),
     ]
 
     admin               = models.ForeignKey(

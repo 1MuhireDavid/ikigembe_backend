@@ -1,6 +1,6 @@
 from django.db import transaction
 from django.db.models import Sum, Count, Q
-from django.db.models.functions import Coalesce, TruncMonth
+from django.db.models.functions import Coalesce, TruncDay, TruncMonth, TruncWeek
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.views import APIView
