@@ -208,14 +208,14 @@ class AdminViewersListView(AdminBaseView):
         summary='List all viewers (payment data only)',
         description=(
             'Returns every viewer account with payment statistics. '
-            'Personal details (name, email, phone) are intentionally omitted to protect user privacy. '
-            'Use GET /api/admin/dashboard/viewers/<id>/ only for dispute or support cases.'
+            'Use GET /api/admin/dashboard/viewers/<id>/ for full contact details.'
         ),
         responses={
             200: inline_serializer(
                 name='ViewerItem',
                 fields={
                     'id': drf_serializers.IntegerField(),
+                    'name': drf_serializers.CharField(help_text='Full name'),
                     'payment_count': drf_serializers.IntegerField(help_text='Number of completed purchases'),
                     'total_paid_rwf': drf_serializers.IntegerField(help_text='Total amount spent in RWF'),
                     'last_payment_date': drf_serializers.DateTimeField(allow_null=True, help_text='Date of most recent payment'),
@@ -237,6 +237,7 @@ class AdminViewersListView(AdminBaseView):
         data = [
             {
                 'id': v.id,
+                'name': v.full_name,
                 'payment_count': v.payment_count,
                 'total_paid_rwf': v.total_paid_rwf,
                 'last_payment_date': v.last_payment_date,

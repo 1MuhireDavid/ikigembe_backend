@@ -130,12 +130,13 @@ class AdminDashboardTests(APITestCase):
     def test_viewers_list_endpoint(self):
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.admin_token}')
         response = self.client.get('/api/admin/dashboard/viewers/')
-        
+
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         # Verify viewer 1
-        viewer1_data = next(v for v in response.data if v['email'] == 'viewer1@example.com')
-        self.assertEqual(viewer1_data['movies_watched'], 1) # Only completed payments count
-        self.assertEqual(viewer1_data['payments_made'], 1000)
+        viewer1_data = next(v for v in response.data if v['id'] == self.viewer1.id)
+        self.assertEqual(viewer1_data['name'], 'Viewer One')
+        self.assertEqual(viewer1_data['payment_count'], 1)  # Only completed payments count
+        self.assertEqual(viewer1_data['total_paid_rwf'], 1000)
 
     def test_user_suspend_endpoint(self):
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.admin_token}')
