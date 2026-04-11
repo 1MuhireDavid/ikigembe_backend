@@ -60,6 +60,45 @@ def _safe_page(request):
         return 1
 
 
+def _parse_date_range(request, default_days):
+    """
+    Parse optional ?start_date= and ?end_date= (YYYY-MM-DD) from the request.
+
+    - until defaults to now(); since defaults to until - default_days.
+    - If default_days is None, since defaults to 2000-01-01 (all available data).
+    - end_date is inclusive: it extends to 23:59:59.999999 of that day.
+    - since is anchored to until (not now) so historical end_date-only queries
+      never produce an empty window due to since > until.
+
+    Returns (since, until) as timezone-aware datetimes.
+    """
+    from datetime import datetime, timedelta
+    since = until = None
+    start_raw = request.GET.get('start_date')
+    end_raw = request.GET.get('end_date')
+    try:
+        since = timezone.make_aware(datetime.strptime(start_raw, '%Y-%m-%d')) if start_raw else None
+    except ValueError:
+        pass
+    try:
+        until = timezone.make_aware(
+            datetime.strptime(end_raw, '%Y-%m-%d').replace(
+                hour=23, minute=59, second=59, microsecond=999999
+            )
+        ) if end_raw else None
+    except ValueError:
+        pass
+    if until is None:
+        until = timezone.now()
+    if since is None:
+        since = (
+            timezone.make_aware(datetime(2000, 1, 1))
+            if default_days is None
+            else until - timedelta(days=default_days)
+        )
+    return since, until
+
+
 class AdminBaseView(APIView):
     permission_classes = [IsAuthenticated, IsAdminRole]
 
@@ -1333,8 +1372,23 @@ class AdminRevenueTrendView(AdminBaseView):
                 description=(
                     'How many periods back to include. '
                     'Defaults: daily=30, weekly=12, monthly=12, yearly=5. '
-                    'Maximums: daily=90, weekly=52, monthly=36, yearly=10.'
+                    'Maximums: daily=90, weekly=52, monthly=36, yearly=10. '
+                    'Ignored when start_date/end_date are provided.'
                 ),
+            ),
+            OpenApiParameter(
+                name='start_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Start of date range (YYYY-MM-DD). Overrides ?periods= when provided.',
+            ),
+            OpenApiParameter(
+                name='end_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='End of date range inclusive (YYYY-MM-DD). Defaults to today.',
             ),
         ],
         responses={
@@ -1364,27 +1418,26 @@ class AdminRevenueTrendView(AdminBaseView):
 
         period = request.GET.get('period', 'monthly')
 
+        # Determine trunc function and default lookback for fallback
         if period == 'daily':
-            n = _safe_int(request, 'periods', 30, maximum=90)
             trunc_fn = TruncDay
-            since = timezone.now() - timedelta(days=n)
+            default_days = _safe_int(request, 'periods', 30, maximum=90)
         elif period == 'weekly':
-            n = _safe_int(request, 'periods', 12, maximum=52)
             trunc_fn = TruncWeek
-            since = timezone.now() - timedelta(weeks=n)
+            default_days = _safe_int(request, 'periods', 12, maximum=52) * 7
         elif period == 'yearly':
-            n = _safe_int(request, 'periods', 5, maximum=10)
             trunc_fn = TruncYear
-            since = timezone.now() - timedelta(days=n * 366)
+            default_days = _safe_int(request, 'periods', 5, maximum=10) * 366
         else:
             period = 'monthly'
-            n = _safe_int(request, 'periods', 12, maximum=36)
             trunc_fn = TruncMonth
-            since = timezone.now() - timedelta(days=n * 31)
+            default_days = _safe_int(request, 'periods', 12, maximum=36) * 31
+
+        since, until = _parse_date_range(request, default_days)
 
         rows = (
             Payment.objects
-            .filter(status='Completed', created_at__gte=since)
+            .filter(status='Completed', created_at__gte=since, created_at__lte=until)
             .annotate(period_start=trunc_fn('created_at'))
             .values('period_start')
             .annotate(total_revenue=Sum('amount'), purchase_count=Count('id'))
@@ -1432,6 +1485,20 @@ class AdminTopMoviesView(AdminBaseView):
                 default=10,
                 description='Number of results (default 10, max 50)',
             ),
+            OpenApiParameter(
+                name='start_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Only count payments from this date (YYYY-MM-DD).',
+            ),
+            OpenApiParameter(
+                name='end_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Only count payments up to this date inclusive (YYYY-MM-DD).',
+            ),
         ],
         responses={
             200: inline_serializer(
@@ -1460,12 +1527,16 @@ class AdminTopMoviesView(AdminBaseView):
     def get(self, request):
         sort = request.GET.get('sort', 'revenue')
         limit = min(_safe_int(request, 'limit', 10), 50)
+        since, until = _parse_date_range(request, default_days=365)
 
+        date_filter = Q(
+            payments__status='Completed',
+            payments__created_at__gte=since,
+            payments__created_at__lte=until,
+        )
         movies = Movie.objects.select_related('producer_profile').annotate(
-            total_revenue=Coalesce(
-                Sum('payments__amount', filter=Q(payments__status='Completed')), 0
-            ),
-            purchase_count=Count('payments', filter=Q(payments__status='Completed')),
+            total_revenue=Coalesce(Sum('payments__amount', filter=date_filter), 0),
+            purchase_count=Count('payments', filter=date_filter),
         )
 
         if sort == 'views':
@@ -1504,7 +1575,21 @@ class AdminUserGrowthView(AdminBaseView):
                 location=OpenApiParameter.QUERY,
                 required=False,
                 default=12,
-                description='How many months back to include (default 12)',
+                description='How many months back to include (default 12). Ignored when start_date/end_date are provided.',
+            ),
+            OpenApiParameter(
+                name='start_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Start of date range (YYYY-MM-DD). Overrides ?months= when provided.',
+            ),
+            OpenApiParameter(
+                name='end_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='End of date range inclusive (YYYY-MM-DD). Defaults to today.',
             ),
         ],
         responses={
@@ -1528,16 +1613,14 @@ class AdminUserGrowthView(AdminBaseView):
         },
     )
     def get(self, request):
-        from datetime import timedelta
-
         months = _safe_int(request, 'months', 12, maximum=24)
-        since = timezone.now() - timedelta(days=months * 31)
+        since, until = _parse_date_range(request, default_days=months * 31)
 
         viewer_rows = {
             row['month']: row['count']
             for row in (
                 User.objects
-                .filter(role='Viewer', date_joined__gte=since)
+                .filter(role='Viewer', date_joined__gte=since, date_joined__lte=until)
                 .annotate(month=TruncMonth('date_joined'))
                 .values('month')
                 .annotate(count=Count('id'))
@@ -1548,7 +1631,7 @@ class AdminUserGrowthView(AdminBaseView):
             row['month']: row['count']
             for row in (
                 User.objects
-                .filter(role='Producer', date_joined__gte=since)
+                .filter(role='Producer', date_joined__gte=since, date_joined__lte=until)
                 .annotate(month=TruncMonth('date_joined'))
                 .values('month')
                 .annotate(count=Count('id'))
@@ -1593,6 +1676,20 @@ class AdminPayingUsersReportView(AdminBaseView):
                 default=1,
                 description='Page number (50 users per page)',
             ),
+            OpenApiParameter(
+                name='start_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Only include payments from this date (YYYY-MM-DD).',
+            ),
+            OpenApiParameter(
+                name='end_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Only include payments up to this date inclusive (YYYY-MM-DD).',
+            ),
         ],
         responses={
             200: inline_serializer(
@@ -1633,16 +1730,21 @@ class AdminPayingUsersReportView(AdminBaseView):
         },
     )
     def get(self, request):
+        since, until = _parse_date_range(request, default_days=None)  # default: all data since 2000-01-01
+        date_filter = Q(
+            payments__status='Completed',
+            payments__created_at__gte=since,
+            payments__created_at__lte=until,
+        )
+
         base_qs = (
             User.objects
             .filter(role='Viewer')
             .annotate(
-                payment_count=Count('payments', filter=Q(payments__status='Completed')),
-                total_paid_rwf=Coalesce(
-                    Sum('payments__amount', filter=Q(payments__status='Completed')), 0
-                ),
-                first_payment_date=Min('payments__created_at', filter=Q(payments__status='Completed')),
-                last_payment_date=Max('payments__created_at', filter=Q(payments__status='Completed')),
+                payment_count=Count('payments', filter=date_filter),
+                total_paid_rwf=Coalesce(Sum('payments__amount', filter=date_filter), 0),
+                first_payment_date=Min('payments__created_at', filter=date_filter),
+                last_payment_date=Max('payments__created_at', filter=date_filter),
             )
             .filter(payment_count__gt=0)
             .order_by('-total_paid_rwf')
@@ -1666,7 +1768,12 @@ class AdminPayingUsersReportView(AdminBaseView):
         payments_by_user = {}
         for p in (
             Payment.objects
-            .filter(user_id__in=viewer_ids, status='Completed')
+            .filter(
+                user_id__in=viewer_ids,
+                status='Completed',
+                created_at__gte=since,
+                created_at__lte=until,
+            )
             .select_related('movie')
             .order_by('user_id', '-created_at')
         ):
@@ -1780,7 +1887,21 @@ class AdminWithdrawalSummaryView(AdminBaseView):
                 location=OpenApiParameter.QUERY,
                 required=False,
                 default=12,
-                description='How many months back to include (default 12)',
+                description='How many months back to include (default 12). Ignored when start_date/end_date are provided.',
+            ),
+            OpenApiParameter(
+                name='start_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Start of date range (YYYY-MM-DD). Overrides ?months= when provided.',
+            ),
+            OpenApiParameter(
+                name='end_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='End of date range inclusive (YYYY-MM-DD). Defaults to today.',
             ),
         ],
         responses={
@@ -1805,17 +1926,15 @@ class AdminWithdrawalSummaryView(AdminBaseView):
         },
     )
     def get(self, request):
-        from datetime import timedelta
-
         months = _safe_int(request, 'months', 12, maximum=24)
-        since = timezone.now() - timedelta(days=months * 31)
+        since, until = _parse_date_range(request, default_days=months * 31)
 
         def _by_status(status_filter):
             return {
                 row['month']: row['total']
                 for row in (
                     WithdrawalRequest.objects
-                    .filter(status=status_filter, created_at__gte=since)
+                    .filter(status=status_filter, created_at__gte=since, created_at__lte=until)
                     .annotate(month=TruncMonth('created_at'))
                     .values('month')
                     .annotate(total=Sum('amount'))
@@ -1830,7 +1949,7 @@ class AdminWithdrawalSummaryView(AdminBaseView):
             row['month']: row['count']
             for row in (
                 WithdrawalRequest.objects
-                .filter(created_at__gte=since)
+                .filter(created_at__gte=since, created_at__lte=until)
                 .annotate(month=TruncMonth('created_at'))
                 .values('month')
                 .annotate(count=Count('id'))
