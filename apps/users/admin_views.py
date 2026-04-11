@@ -50,6 +50,7 @@ def _log_admin_action(request, action, detail=None, target_user=None, target_wit
     logger.info('Admin %s performed %s | detail=%s', request.user.email, action, detail)
 
 _TAG = 'Admin Dashboard'
+_REPORTS_TAG = 'Admin Reports'
 
 
 def _safe_page(request):
@@ -632,7 +633,7 @@ class AdminProducerMoviesView(AdminBaseView):
 
 class AdminProducerReportView(AdminBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary="Audit a producer's movie performance",
         description=(
             'Returns the producer\'s wallet summary and per-movie aggregate stats. '
@@ -723,7 +724,7 @@ class AdminProducerReportView(AdminBaseView):
 
 class AdminProducerMoviePurchasesView(AdminBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary="Paginated purchase audit for a producer's movie",
         description=(
             'Returns completed purchases for a specific movie owned by the given producer, '
@@ -1346,7 +1347,7 @@ def _safe_int(request, param, default, minimum=1, maximum=None):
 
 class AdminRevenueTrendView(AdminBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary='Platform revenue over time',
         description=(
             'Returns revenue grouped by month or week for the last N periods. '
@@ -1461,7 +1462,7 @@ class AdminRevenueTrendView(AdminBaseView):
 
 class AdminTopMoviesView(AdminBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary='Top movies by revenue or views',
         description=(
             'Returns the top N movies ranked by completed payment revenue or by raw view count. '
@@ -1562,7 +1563,7 @@ class AdminTopMoviesView(AdminBaseView):
 
 class AdminUserGrowthView(AdminBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary='User registration growth over time',
         description=(
             'Returns new user registrations grouped by month for the last N months, '
@@ -1660,7 +1661,7 @@ class AdminPayingUsersReportView(AdminBaseView):
     _PAGE_SIZE = 50
 
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary='Report of all users who have made at least one payment',
         description=(
             'Returns paginated viewers who have at least one completed payment, '
@@ -1873,7 +1874,7 @@ class AdminUserResetPasswordView(AdminBaseView):
 
 class AdminWithdrawalSummaryView(AdminBaseView):
     @extend_schema(
-        tags=[_TAG],
+        tags=[_REPORTS_TAG],
         summary='Withdrawal payout summary by period',
         description=(
             'Returns monthly totals for withdrawal requests, broken down by status '
