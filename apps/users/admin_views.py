@@ -14,7 +14,7 @@ from drf_spectacular.utils import (
 )
 from drf_spectacular.types import OpenApiTypes
 from django.db.models import Sum, Count, Q
-from django.db.models.functions import Coalesce, TruncMonth, TruncWeek
+from django.db.models.functions import Coalesce, TruncDate, TruncMonth, TruncWeek, TruncYear
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -205,20 +205,21 @@ class AdminTransactionHistoryView(AdminBaseView):
 class AdminViewersListView(AdminBaseView):
     @extend_schema(
         tags=[_TAG],
-        summary='List all viewers',
-        description='Returns every viewer account with purchase statistics.',
+        summary='List all viewers (payment data only)',
+        description=(
+            'Returns every viewer account with payment statistics. '
+            'Personal details (name, email, phone) are intentionally omitted to protect user privacy. '
+            'Use GET /viewers/<id>/ only for dispute or support cases.'
+        ),
         responses={
             200: inline_serializer(
                 name='ViewerItem',
                 fields={
                     'id': drf_serializers.IntegerField(),
-                    'name': drf_serializers.CharField(help_text='Full name'),
-                    'email': drf_serializers.EmailField(allow_null=True),
-                    'phone_number': drf_serializers.CharField(allow_null=True),
-                    'movies_watched': drf_serializers.IntegerField(help_text='Number of movies purchased'),
-                    'payments_made': drf_serializers.IntegerField(help_text='Total amount spent in RWF'),
+                    'payment_count': drf_serializers.IntegerField(help_text='Number of completed purchases'),
+                    'total_paid_rwf': drf_serializers.IntegerField(help_text='Total amount spent in RWF'),
+                    'last_payment_date': drf_serializers.DateTimeField(allow_null=True, help_text='Date of most recent payment'),
                     'is_active': drf_serializers.BooleanField(),
-                    'date_joined': drf_serializers.DateTimeField(),
                 },
                 many=True,
             ),
@@ -227,23 +228,71 @@ class AdminViewersListView(AdminBaseView):
         },
     )
     def get(self, request):
+        from django.db.models import Max
         viewers = User.objects.filter(role='Viewer').annotate(
-            movies_watched=Count('payments', filter=Q(payments__status='Completed')),
-            payments_made=Sum('payments__amount', filter=Q(payments__status='Completed'))
+            payment_count=Count('payments', filter=Q(payments__status='Completed')),
+            total_paid_rwf=Coalesce(Sum('payments__amount', filter=Q(payments__status='Completed')), 0),
+            last_payment_date=Max('payments__created_at', filter=Q(payments__status='Completed')),
         )
-        data = []
-        for v in viewers:
-            data.append({
+        data = [
+            {
                 'id': v.id,
-                'name': v.full_name,
-                'email': v.email,
-                'phone_number': v.phone_number,
-                'movies_watched': v.movies_watched,
-                'payments_made': v.payments_made or 0,
+                'payment_count': v.payment_count,
+                'total_paid_rwf': v.total_paid_rwf,
+                'last_payment_date': v.last_payment_date,
                 'is_active': v.is_active,
-                'date_joined': v.date_joined
-            })
+            }
+            for v in viewers
+        ]
         return Response(data)
+
+
+class AdminViewerDetailView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Full viewer details (dispute / support use only)',
+        description=(
+            'Returns personal contact details for a specific viewer. '
+            'This endpoint should only be accessed when investigating a payment dispute or handling a support request.'
+        ),
+        responses={
+            200: inline_serializer(
+                name='ViewerDetail',
+                fields={
+                    'id': drf_serializers.IntegerField(),
+                    'name': drf_serializers.CharField(help_text='Full name'),
+                    'email': drf_serializers.EmailField(allow_null=True),
+                    'phone_number': drf_serializers.CharField(allow_null=True),
+                    'movies_watched': drf_serializers.IntegerField(help_text='Number of completed purchases'),
+                    'total_paid_rwf': drf_serializers.IntegerField(help_text='Total amount spent in RWF'),
+                    'is_active': drf_serializers.BooleanField(),
+                    'date_joined': drf_serializers.DateTimeField(),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+            404: OpenApiResponse(description='Viewer not found'),
+        },
+    )
+    def get(self, request, user_id):
+        viewer = get_object_or_404(User, id=user_id, role='Viewer')
+        viewer = User.objects.filter(id=user_id, role='Viewer').annotate(
+            movies_watched=Count('payments', filter=Q(payments__status='Completed')),
+            total_paid_rwf=Coalesce(Sum('payments__amount', filter=Q(payments__status='Completed')), 0),
+        ).first()
+        if not viewer:
+            from rest_framework.exceptions import NotFound
+            raise NotFound('Viewer not found.')
+        return Response({
+            'id': viewer.id,
+            'name': viewer.full_name,
+            'email': viewer.email,
+            'phone_number': viewer.phone_number,
+            'movies_watched': viewer.movies_watched,
+            'total_paid_rwf': viewer.total_paid_rwf,
+            'is_active': viewer.is_active,
+            'date_joined': viewer.date_joined,
+        })
 
 
 class AdminViewerPaymentsView(AdminBaseView):
@@ -364,6 +413,8 @@ class AdminProducersListView(AdminBaseView):
                     'name': drf_serializers.CharField(help_text='Full name'),
                     'email': drf_serializers.EmailField(allow_null=True),
                     'phone_number': drf_serializers.CharField(allow_null=True),
+                    'address': drf_serializers.CharField(allow_blank=True),
+                    'copyright_code': drf_serializers.CharField(allow_blank=True),
                     'movies_uploaded': drf_serializers.IntegerField(),
                     'total_earnings': drf_serializers.IntegerField(help_text='70% share of revenue from their movies (RWF)'),
                     'balance': drf_serializers.IntegerField(help_text='Available balance for withdrawal (RWF)'),
@@ -427,6 +478,8 @@ class AdminProducersListView(AdminBaseView):
                 'name': p.full_name,
                 'email': p.email,
                 'phone_number': p.phone_number,
+                'address': p.address,
+                'copyright_code': p.copyright_code,
                 'movies_uploaded': p.movies_uploaded_count,
                 'total_earnings': total_earnings,
                 'balance': total_earnings - locked,
@@ -458,6 +511,8 @@ class AdminProducerReportView(AdminBaseView):
                             'name': drf_serializers.CharField(),
                             'email': drf_serializers.EmailField(allow_null=True),
                             'phone_number': drf_serializers.CharField(allow_null=True),
+                            'address': drf_serializers.CharField(allow_blank=True),
+                            'copyright_code': drf_serializers.CharField(allow_blank=True),
                             'total_earnings': drf_serializers.IntegerField(),
                             'balance': drf_serializers.IntegerField(),
                             'pending_withdrawals': drf_serializers.IntegerField(),
@@ -516,6 +571,8 @@ class AdminProducerReportView(AdminBaseView):
                 'name': producer.full_name,
                 'email': producer.email,
                 'phone_number': producer.phone_number,
+                'address': producer.address,
+                'copyright_code': producer.copyright_code,
                 'total_earnings': wallet['total_earnings'],
                 'balance': wallet['wallet_balance'],
                 'pending_withdrawals': wallet['pending_withdrawals'],
@@ -677,6 +734,8 @@ class AdminCreateProducerView(AdminBaseView):
                 'phone_number': drf_serializers.CharField(required=False, allow_null=True, help_text='Optional if email is provided'),
                 'first_name': drf_serializers.CharField(required=False, allow_blank=True, default=''),
                 'last_name': drf_serializers.CharField(required=False, allow_blank=True, default=''),
+                'address': drf_serializers.CharField(required=False, allow_blank=True, default=''),
+                'copyright_code': drf_serializers.CharField(required=False, allow_blank=True, default=''),
             },
         ),
         responses={
@@ -687,6 +746,8 @@ class AdminCreateProducerView(AdminBaseView):
                     'email': drf_serializers.EmailField(allow_null=True),
                     'phone_number': drf_serializers.CharField(allow_null=True),
                     'full_name': drf_serializers.CharField(),
+                    'address': drf_serializers.CharField(allow_blank=True),
+                    'copyright_code': drf_serializers.CharField(allow_blank=True),
                     'role': drf_serializers.CharField(help_text='Always "Producer"'),
                     'generated_password': drf_serializers.CharField(
                         help_text='Temporary password — share with the producer and ask them to change it immediately'
@@ -703,6 +764,8 @@ class AdminCreateProducerView(AdminBaseView):
         first_name = request.data.get('first_name', '')
         last_name = request.data.get('last_name', '')
         phone_number = request.data.get('phone_number') or None
+        address = request.data.get('address', '')
+        copyright_code = request.data.get('copyright_code', '')
 
         if not email and not phone_number:
             return Response({'error': 'Email or phone number is required.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -721,6 +784,13 @@ class AdminCreateProducerView(AdminBaseView):
             role='Producer',
             is_active=True,
         )
+        if address:
+            user.address = address
+        if copyright_code:
+            user.copyright_code = copyright_code
+        if address or copyright_code:
+            user.save(update_fields=['address', 'copyright_code'])
+
         _log_admin_action(request, 'create_producer', target_user=user,
                           detail={'email': user.email, 'phone': user.phone_number})
         return Response({
@@ -728,6 +798,8 @@ class AdminCreateProducerView(AdminBaseView):
             'email': user.email,
             'phone_number': user.phone_number,
             'full_name': user.full_name,
+            'address': user.address,
+            'copyright_code': user.copyright_code,
             'role': user.role,
             'generated_password': password,
         }, status=status.HTTP_201_CREATED)
@@ -789,9 +861,41 @@ class AdminWithdrawalsListView(AdminBaseView):
         start = (page - 1) * page_size
         total = qs.count()
 
+        page_qs = list(qs[start:start + page_size])
+
+        # Batch wallet balance calculation — 2 queries for all unique producers on this page.
+        producer_ids = list({wr.producer_id for wr in page_qs})
+        revenue_map = {
+            row['movie__producer_profile_id']: row['total']
+            for row in Payment.objects.filter(
+                movie__producer_profile_id__in=producer_ids,
+                status='Completed',
+            ).values('movie__producer_profile_id').annotate(total=Sum('amount'))
+        }
+        locked_map = {
+            row['producer_id']: row['total']
+            for row in WithdrawalRequest.objects.filter(
+                producer_id__in=producer_ids,
+                status__in=['Pending', 'Approved', 'Processing', 'Completed'],
+            ).values('producer_id').annotate(total=Sum('amount'))
+        }
+
+        def _wallet_balance(producer_id):
+            raw = revenue_map.get(producer_id) or 0
+            earnings = (raw * 70) // 100
+            locked = locked_map.get(producer_id) or 0
+            return earnings - locked
+
+        serialized = AdminWithdrawalRequestSerializer(page_qs, many=True).data
+        results = []
+        for item, wr in zip(serialized, page_qs):
+            entry = dict(item)
+            entry['wallet_balance'] = _wallet_balance(wr.producer_id)
+            results.append(entry)
+
         return Response({
             'page': page,
-            'results': AdminWithdrawalRequestSerializer(qs[start:start + page_size], many=True).data,
+            'results': results,
             'total_results': total,
             'total_pages': (total + page_size - 1) // page_size,
         })
@@ -1116,7 +1220,7 @@ class AdminRevenueTrendView(AdminBaseView):
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 required=False,
-                enum=['monthly', 'weekly'],
+                enum=['daily', 'weekly', 'monthly', 'yearly'],
                 default='monthly',
                 description='Grouping granularity',
             ),
@@ -1126,14 +1230,18 @@ class AdminRevenueTrendView(AdminBaseView):
                 location=OpenApiParameter.QUERY,
                 required=False,
                 default=12,
-                description='How many periods back to include (default 12)',
+                description=(
+                    'How many periods back to include. '
+                    'Defaults: daily=30, weekly=12, monthly=12, yearly=5. '
+                    'Maximums: daily=90, weekly=52, monthly=36, yearly=10.'
+                ),
             ),
         ],
         responses={
             200: inline_serializer(
                 name='AdminRevenueTrend',
                 fields={
-                    'period': drf_serializers.CharField(help_text='monthly or weekly'),
+                    'period': drf_serializers.CharField(help_text='daily | weekly | monthly | yearly'),
                     'trend': inline_serializer(
                         name='AdminRevenueTrendItem',
                         fields={
@@ -1155,13 +1263,22 @@ class AdminRevenueTrendView(AdminBaseView):
         from datetime import timedelta
 
         period = request.GET.get('period', 'monthly')
-        n = _safe_int(request, 'periods', 12, maximum=52)
 
-        if period == 'weekly':
+        if period == 'daily':
+            n = _safe_int(request, 'periods', 30, maximum=90)
+            trunc_fn = TruncDate
+            since = timezone.now() - timedelta(days=n)
+        elif period == 'weekly':
+            n = _safe_int(request, 'periods', 12, maximum=52)
             trunc_fn = TruncWeek
             since = timezone.now() - timedelta(weeks=n)
+        elif period == 'yearly':
+            n = _safe_int(request, 'periods', 5, maximum=10)
+            trunc_fn = TruncYear
+            since = timezone.now() - timedelta(days=n * 366)
         else:
             period = 'monthly'
+            n = _safe_int(request, 'periods', 12, maximum=36)
             trunc_fn = TruncMonth
             since = timezone.now() - timedelta(days=n * 31)
 
