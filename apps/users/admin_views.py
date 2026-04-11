@@ -209,7 +209,7 @@ class AdminViewersListView(AdminBaseView):
         description=(
             'Returns every viewer account with payment statistics. '
             'Personal details (name, email, phone) are intentionally omitted to protect user privacy. '
-            'Use GET /viewers/<id>/ only for dispute or support cases.'
+            'Use GET /api/admin/dashboard/viewers/<id>/ only for dispute or support cases.'
         ),
         responses={
             200: inline_serializer(
