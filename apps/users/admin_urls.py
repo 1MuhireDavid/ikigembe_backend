@@ -10,6 +10,8 @@ from .admin_views import (
     AdminProducersListView,
     AdminProducerApproveView,
     AdminProducerSuspendView,
+    AdminProducerDetailView,
+    AdminProducerMoviesView,
     AdminProducerReportView,
     AdminCreateProducerView,
     AdminWithdrawalsListView,
@@ -23,6 +25,7 @@ from .admin_views import (
     AdminUserGrowthView,
     AdminWithdrawalSummaryView,
     AdminProducerMoviePurchasesView,
+    AdminPayingUsersReportView,
 )
 
 urlpatterns = [
@@ -41,6 +44,8 @@ urlpatterns = [
     # Producers
     path('producers/', AdminProducersListView.as_view(), name='admin-producers-list'),
     path('producers/create/', AdminCreateProducerView.as_view(), name='admin-producer-create'),
+    path('producers/<int:user_id>/', AdminProducerDetailView.as_view(), name='admin-producer-detail'),
+    path('producers/<int:user_id>/movies/', AdminProducerMoviesView.as_view(), name='admin-producer-movies'),
     path('producers/<int:user_id>/approve/', AdminProducerApproveView.as_view(), name='admin-producer-approve'),
     path('producers/<int:user_id>/suspend/', AdminProducerSuspendView.as_view(), name='admin-producer-suspend'),
     path('producers/<int:user_id>/report/', AdminProducerReportView.as_view(), name='admin-producer-report'),
@@ -51,6 +56,7 @@ urlpatterns = [
     path('reports/top-movies/', AdminTopMoviesView.as_view(), name='admin-top-movies'),
     path('reports/user-growth/', AdminUserGrowthView.as_view(), name='admin-user-growth'),
     path('reports/withdrawal-summary/', AdminWithdrawalSummaryView.as_view(), name='admin-withdrawal-summary'),
+    path('reports/paying-users/', AdminPayingUsersReportView.as_view(), name='admin-paying-users-report'),
 
     # Withdrawal Requests
     path('withdrawals/', AdminWithdrawalsListView.as_view(), name='admin-withdrawals-list'),
