@@ -502,6 +502,95 @@ class AdminProducersListView(AdminBaseView):
         return Response(data)
 
 
+class AdminProducerDetailView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Single producer detail',
+        description='Returns profile, status, and wallet summary for one producer.',
+        responses={
+            200: inline_serializer(
+                name='AdminProducerDetail',
+                fields={
+                    'id': drf_serializers.IntegerField(),
+                    'name': drf_serializers.CharField(),
+                    'email': drf_serializers.EmailField(allow_null=True),
+                    'phone_number': drf_serializers.CharField(allow_null=True),
+                    'address': drf_serializers.CharField(allow_blank=True),
+                    'copyright_code': drf_serializers.CharField(allow_blank=True),
+                    'is_active': drf_serializers.BooleanField(),
+                    'date_joined': drf_serializers.DateTimeField(),
+                    'total_earnings': drf_serializers.IntegerField(help_text='70% share of completed revenue (RWF)'),
+                    'balance': drf_serializers.IntegerField(help_text='Available balance for withdrawal (RWF)'),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+            404: OpenApiResponse(description='Producer not found'),
+        },
+    )
+    def get(self, request, user_id):
+        producer = get_object_or_404(User, id=user_id, role='Producer')
+        wallet = get_producer_wallet(producer)
+        return Response({
+            'id': producer.id,
+            'name': producer.full_name,
+            'email': producer.email,
+            'phone_number': producer.phone_number,
+            'address': producer.address,
+            'copyright_code': producer.copyright_code,
+            'is_active': producer.is_active,
+            'date_joined': producer.date_joined,
+            'total_earnings': wallet['total_earnings'],
+            'balance': wallet['wallet_balance'],
+        })
+
+
+class AdminProducerMoviesView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary="All movies for one producer",
+        description='Returns per-movie stats including revenue split for a given producer.',
+        responses={
+            200: inline_serializer(
+                name='AdminProducerMovieItem',
+                fields={
+                    'id': drf_serializers.IntegerField(),
+                    'title': drf_serializers.CharField(),
+                    'views': drf_serializers.IntegerField(),
+                    'total_revenue': drf_serializers.IntegerField(help_text='Sum of completed payments (RWF)'),
+                    'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
+                    'website_share': drf_serializers.IntegerField(help_text='30% of total_revenue (RWF)'),
+                    'upload_date': drf_serializers.DateTimeField(help_text='When the movie was uploaded'),
+                },
+                many=True,
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+            404: OpenApiResponse(description='Producer not found'),
+        },
+    )
+    def get(self, request, user_id):
+        producer = get_object_or_404(User, id=user_id, role='Producer')
+        movies = Movie.objects.filter(producer_profile=producer).annotate(
+            total_revenue=Coalesce(
+                Sum('payments__amount', filter=Q(payments__status='Completed')), 0
+            ),
+        ).order_by('-created_at')
+        data = [
+            {
+                'id': m.id,
+                'title': m.title,
+                'views': m.views,
+                'total_revenue': m.total_revenue,
+                'producer_share': (m.total_revenue * 70) // 100,
+                'website_share': (m.total_revenue * 30) // 100,
+                'upload_date': m.created_at,
+            }
+            for m in movies
+        ]
+        return Response(data)
+
+
 class AdminProducerReportView(AdminBaseView):
     @extend_schema(
         tags=[_TAG],
@@ -1478,6 +1567,107 @@ class AdminUserGrowthView(AdminBaseView):
         ]
 
         return Response({'trend': trend})
+
+
+# ─────────────────────────────────────────────
+# Report: Paying users
+# ─────────────────────────────────────────────
+
+class AdminPayingUsersReportView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Report of all users who have made at least one payment',
+        description=(
+            'Returns every viewer who has at least one completed payment, '
+            'with their contact details, total spend, purchase count, and '
+            'a flat list of every individual payment they made.'
+        ),
+        responses={
+            200: inline_serializer(
+                name='PayingUsersReport',
+                fields={
+                    'total_paying_users': drf_serializers.IntegerField(),
+                    'results': inline_serializer(
+                        name='PayingUserItem',
+                        fields={
+                            'id': drf_serializers.IntegerField(),
+                            'name': drf_serializers.CharField(),
+                            'email': drf_serializers.EmailField(allow_null=True),
+                            'phone_number': drf_serializers.CharField(allow_null=True),
+                            'payment_count': drf_serializers.IntegerField(help_text='Number of completed purchases'),
+                            'total_paid_rwf': drf_serializers.IntegerField(help_text='Total amount spent in RWF'),
+                            'first_payment_date': drf_serializers.DateTimeField(allow_null=True),
+                            'last_payment_date': drf_serializers.DateTimeField(allow_null=True),
+                            'payments': inline_serializer(
+                                name='PayingUserPaymentItem',
+                                fields={
+                                    'id': drf_serializers.IntegerField(),
+                                    'movie_title': drf_serializers.CharField(),
+                                    'amount': drf_serializers.IntegerField(),
+                                    'status': drf_serializers.CharField(),
+                                    'paid_at': drf_serializers.DateTimeField(),
+                                },
+                                many=True,
+                            ),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        from django.db.models import Min
+        viewers = (
+            User.objects
+            .filter(role='Viewer')
+            .annotate(
+                payment_count=Count('payments', filter=Q(payments__status='Completed')),
+                total_paid_rwf=Coalesce(
+                    Sum('payments__amount', filter=Q(payments__status='Completed')), 0
+                ),
+                first_payment_date=Min('payments__created_at', filter=Q(payments__status='Completed')),
+                last_payment_date=Max('payments__created_at', filter=Q(payments__status='Completed')),
+            )
+            .filter(payment_count__gt=0)
+            .order_by('-total_paid_rwf')
+        )
+
+        # Batch-fetch all completed payments for matching viewers in one query.
+        viewer_ids = [v.id for v in viewers]
+        payments_qs = (
+            Payment.objects
+            .filter(user_id__in=viewer_ids, status='Completed')
+            .select_related('movie')
+            .order_by('user_id', '-created_at')
+        )
+        payments_by_user = {}
+        for p in payments_qs:
+            payments_by_user.setdefault(p.user_id, []).append({
+                'id': p.id,
+                'movie_title': p.movie.title if p.movie else 'Unknown',
+                'amount': p.amount,
+                'status': p.status,
+                'paid_at': p.created_at,
+            })
+
+        results = [
+            {
+                'id': v.id,
+                'name': v.full_name,
+                'email': v.email,
+                'phone_number': v.phone_number,
+                'payment_count': v.payment_count,
+                'total_paid_rwf': v.total_paid_rwf,
+                'first_payment_date': v.first_payment_date,
+                'last_payment_date': v.last_payment_date,
+                'payments': payments_by_user.get(v.id, []),
+            }
+            for v in viewers
+        ]
+        return Response({'total_paying_users': len(results), 'results': results})
 
 
 # ─────────────────────────────────────────────
