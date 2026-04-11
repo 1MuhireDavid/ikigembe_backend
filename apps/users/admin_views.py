@@ -13,7 +13,7 @@ from drf_spectacular.utils import (
     OpenApiResponse,
 )
 from drf_spectacular.types import OpenApiTypes
-from django.db.models import Sum, Count, Q
+from django.db.models import Sum, Count, Q, Max, Min
 from django.db.models.functions import Coalesce, TruncDay, TruncMonth, TruncWeek, TruncYear
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
@@ -583,7 +583,7 @@ class AdminProducerMoviesView(AdminBaseView):
                 'views': m.views,
                 'total_revenue': m.total_revenue,
                 'producer_share': (m.total_revenue * 70) // 100,
-                'website_share': (m.total_revenue * 30) // 100,
+                'website_share': m.total_revenue - (m.total_revenue * 70) // 100,
                 'upload_date': m.created_at,
             }
             for m in movies
@@ -1574,18 +1574,32 @@ class AdminUserGrowthView(AdminBaseView):
 # ─────────────────────────────────────────────
 
 class AdminPayingUsersReportView(AdminBaseView):
+    _PAGE_SIZE = 50
+
     @extend_schema(
         tags=[_TAG],
         summary='Report of all users who have made at least one payment',
         description=(
-            'Returns every viewer who has at least one completed payment, '
-            'with their contact details, total spend, purchase count, and '
-            'a flat list of every individual payment they made.'
+            'Returns paginated viewers who have at least one completed payment, '
+            'with contact details, total spend, purchase count, and individual payment history. '
+            'Access is audit-logged. 50 users per page.'
         ),
+        parameters=[
+            OpenApiParameter(
+                name='page',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                default=1,
+                description='Page number (50 users per page)',
+            ),
+        ],
         responses={
             200: inline_serializer(
                 name='PayingUsersReport',
                 fields={
+                    'page': drf_serializers.IntegerField(),
+                    'total_pages': drf_serializers.IntegerField(),
                     'total_paying_users': drf_serializers.IntegerField(),
                     'results': inline_serializer(
                         name='PayingUserItem',
@@ -1619,8 +1633,7 @@ class AdminPayingUsersReportView(AdminBaseView):
         },
     )
     def get(self, request):
-        from django.db.models import Min
-        viewers = (
+        base_qs = (
             User.objects
             .filter(role='Viewer')
             .annotate(
@@ -1635,16 +1648,28 @@ class AdminPayingUsersReportView(AdminBaseView):
             .order_by('-total_paid_rwf')
         )
 
-        # Batch-fetch all completed payments for matching viewers in one query.
+        total = base_qs.count()
+        page = _safe_page(request)
+        page_size = self._PAGE_SIZE
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, total_pages)
+        start = (page - 1) * page_size
+        viewers = list(base_qs[start:start + page_size])
+
+        _log_admin_action(
+            request, 'view_paying_users_report',
+            detail={'page': page, 'total_paying_users': total},
+        )
+
+        # Batch-fetch completed payments for this page's viewers in one query.
         viewer_ids = [v.id for v in viewers]
-        payments_qs = (
+        payments_by_user = {}
+        for p in (
             Payment.objects
             .filter(user_id__in=viewer_ids, status='Completed')
             .select_related('movie')
             .order_by('user_id', '-created_at')
-        )
-        payments_by_user = {}
-        for p in payments_qs:
+        ):
             payments_by_user.setdefault(p.user_id, []).append({
                 'id': p.id,
                 'movie_title': p.movie.title if p.movie else 'Unknown',
@@ -1667,7 +1692,12 @@ class AdminPayingUsersReportView(AdminBaseView):
             }
             for v in viewers
         ]
-        return Response({'total_paying_users': len(results), 'results': results})
+        return Response({
+            'page': page,
+            'total_pages': total_pages,
+            'total_paying_users': total,
+            'results': results,
+        })
 
 
 # ─────────────────────────────────────────────
