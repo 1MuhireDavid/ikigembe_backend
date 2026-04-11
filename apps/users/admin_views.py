@@ -63,7 +63,13 @@ def _safe_page(request):
 def _parse_date_range(request, default_days):
     """
     Parse optional ?start_date= and ?end_date= (YYYY-MM-DD) from the request.
-    Falls back to `default_days` back from now when not provided or invalid.
+
+    - until defaults to now(); since defaults to until - default_days.
+    - If default_days is None, since defaults to 2000-01-01 (all available data).
+    - end_date is inclusive: it extends to 23:59:59.999999 of that day.
+    - since is anchored to until (not now) so historical end_date-only queries
+      never produce an empty window due to since > until.
+
     Returns (since, until) as timezone-aware datetimes.
     """
     from datetime import datetime, timedelta
@@ -75,16 +81,21 @@ def _parse_date_range(request, default_days):
     except ValueError:
         pass
     try:
-        # end_date is inclusive: extend to end of that day
         until = timezone.make_aware(
-            datetime.strptime(end_raw, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+            datetime.strptime(end_raw, '%Y-%m-%d').replace(
+                hour=23, minute=59, second=59, microsecond=999999
+            )
         ) if end_raw else None
     except ValueError:
         pass
-    if since is None:
-        since = timezone.now() - timedelta(days=default_days)
     if until is None:
         until = timezone.now()
+    if since is None:
+        since = (
+            timezone.make_aware(datetime(2000, 1, 1))
+            if default_days is None
+            else until - timedelta(days=default_days)
+        )
     return since, until
 
 
@@ -1719,7 +1730,7 @@ class AdminPayingUsersReportView(AdminBaseView):
         },
     )
     def get(self, request):
-        since, until = _parse_date_range(request, default_days=365 * 10)  # default: all time
+        since, until = _parse_date_range(request, default_days=None)  # default: all data since 2000-01-01
         date_filter = Q(
             payments__status='Completed',
             payments__created_at__gte=since,
