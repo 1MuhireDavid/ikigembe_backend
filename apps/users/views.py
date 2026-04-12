@@ -77,29 +77,13 @@ class RegisterView(APIView):
     @extend_schema(
         request=RegisterSerializer,
         responses={
-            201: OpenApiResponse(
-                description='User successfully registered',
-                response={
-                    'type': 'object',
-                    'properties': {
-                        'access': {'type': 'string', 'description': 'JWT access token (expires in 30 minutes)'},
-                        'refresh': {'type': 'string', 'description': 'JWT refresh token (expires in 7 days)'},
-                        'user': {
-                            'type': 'object',
-                            'description': 'User profile information',
-                            'properties': {
-                                'id': {'type': 'integer'},
-                                'email': {'type': 'string', 'nullable': True, 'description': 'Email address (null if registered with phone only)'},
-                                'phone_number': {'type': 'string', 'nullable': True, 'description': 'Phone number (null if registered with email only)'},
-                                'first_name': {'type': 'string'},
-                                'last_name': {'type': 'string'},
-                                'full_name': {'type': 'string'},
-                                'avatar_url': {'type': 'string', 'nullable': True},
-                                'is_staff': {'type': 'boolean'},
-                                'date_joined': {'type': 'string', 'format': 'date-time'},
-                            }
-                        }
-                    }
+            201: inline_serializer(
+                name='RegisterResponse',
+                fields={
+                    'access': drf_serializers.CharField(help_text='JWT access token (expires in 30 minutes)'),
+                    'refresh': drf_serializers.CharField(help_text='JWT refresh token (expires in 7 days)'),
+                    'user': UserSerializer(),
+                    'redirect_to': drf_serializers.CharField(help_text='Frontend route to redirect to after login'),
                 },
             ),
             400: OpenApiResponse(description='Invalid input (validation errors)'),
