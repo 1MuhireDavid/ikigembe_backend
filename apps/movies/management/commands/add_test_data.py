@@ -91,7 +91,6 @@ def create_test_data():
         p1.created_at = now
         p1.save()
 
-    # Payment 5 days ago (avoid duplicates)
     p2, created = Payment.objects.get_or_create(
         user=viewer,
         movie=movie,
