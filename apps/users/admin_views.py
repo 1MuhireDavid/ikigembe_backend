@@ -26,7 +26,7 @@ from apps.users.serializers import AdminCreateProducerSerializer
 from apps.movies.models import Movie
 from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet
-from apps.payments.pawapay import initiate_payout
+from apps.payments.pawapay import initiate_payout, detect_correspondent
 from apps.payments.emails import send_withdrawal_status_email
 
 logger = logging.getLogger(__name__)
@@ -955,7 +955,7 @@ class AdminWithdrawalsListView(AdminBaseView):
         summary='List producer withdrawal requests',
         description=(
             'Returns paginated withdrawal requests. '
-            'Filter by `?status=Pending|Approved|Completed|Rejected`. '
+            'Filter by `?status=Pending|Approved|Processing|Completed|Rejected|Failed`. '
             'Without a filter, all statuses are returned.'
         ),
         parameters=[
@@ -1135,6 +1135,20 @@ class AdminWithdrawalCompleteView(AdminBaseView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Pre-flight: validate MoMo prerequisites before any state change so that a
+        # validation failure never leaves the withdrawal stranded in Approved.
+        if withdrawal.payment_method == 'MoMo':
+            if not withdrawal.momo_number:
+                return Response(
+                    {'error': 'No MoMo number on record for this withdrawal.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not detect_correspondent(withdrawal.momo_number):
+                return Response(
+                    {'error': f'Unrecognized Rwanda phone prefix for number: {withdrawal.momo_number}'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         # Auto-approve Pending withdrawals so admins can skip the two-step flow.
         # The "approved" email is intentionally suppressed — the producer will receive
         # a single completion notification below, which is the meaningful one.
@@ -1161,11 +1175,6 @@ class AdminWithdrawalCompleteView(AdminBaseView):
             })
 
         # MoMo withdrawals: send payout via PawaPay
-        if not withdrawal.momo_number:
-            return Response(
-                {'error': 'No MoMo number on record for this withdrawal.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         payout_id = str(uuid.uuid4())
         try:
