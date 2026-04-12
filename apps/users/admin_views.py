@@ -26,7 +26,7 @@ from apps.users.serializers import AdminCreateProducerSerializer
 from apps.movies.models import Movie
 from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet
-from apps.payments.pawapay import initiate_payout
+from apps.payments.pawapay import initiate_payout, detect_correspondent
 from apps.payments.emails import send_withdrawal_status_email
 
 logger = logging.getLogger(__name__)
@@ -955,7 +955,7 @@ class AdminWithdrawalsListView(AdminBaseView):
         summary='List producer withdrawal requests',
         description=(
             'Returns paginated withdrawal requests. '
-            'Filter by `?status=Pending|Approved|Completed|Rejected`. '
+            'Filter by `?status=Pending|Approved|Processing|Completed|Rejected|Failed`. '
             'Without a filter, all statuses are returned.'
         ),
         parameters=[
@@ -964,7 +964,7 @@ class AdminWithdrawalsListView(AdminBaseView):
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 required=False,
-                enum=['Pending', 'Approved', 'Completed', 'Rejected'],
+                enum=['Pending', 'Approved', 'Processing', 'Completed', 'Rejected', 'Failed'],
                 description='Filter by withdrawal status',
             ),
             OpenApiParameter(
@@ -1095,7 +1095,9 @@ class AdminWithdrawalCompleteView(AdminBaseView):
             'For **MoMo** withdrawals: initiates a PawaPay payout to the producer\'s phone. '
             'Status moves to **Processing** and will be updated to Completed or Failed via webhook. '
             'For **Bank** withdrawals: marks directly as **Completed** (manual transfer assumed). '
-            'Only Approved requests can be completed. Completed records are immutable.'
+            'Accepts **Pending** or **Approved** withdrawals — Pending ones are auto-approved in the '
+            'same operation so admins can skip the two-step flow. '
+            'Processing, Completed, Rejected, and Failed records cannot be re-completed.'
         ),
         request=None,
         responses={
@@ -1107,7 +1109,7 @@ class AdminWithdrawalCompleteView(AdminBaseView):
                     'status': drf_serializers.CharField(help_text='New status after the action'),
                 },
             ),
-            400: OpenApiResponse(description='Withdrawal is not in Approved state, or is already Completed'),
+            400: OpenApiResponse(description='Withdrawal is in a terminal or in-flight state (Processing/Completed/Rejected/Failed)'),
             401: OpenApiResponse(description='Authentication credentials not provided'),
             403: OpenApiResponse(description='Admin role required'),
             404: OpenApiResponse(description='Withdrawal not found'),
@@ -1117,17 +1119,45 @@ class AdminWithdrawalCompleteView(AdminBaseView):
     def post(self, request, withdrawal_id):
         withdrawal = get_object_or_404(WithdrawalRequest, id=withdrawal_id)
 
-        if withdrawal.status == 'Completed':
+        _COMPLETABLE = ('Pending', 'Approved')
+        _TERMINAL_MESSAGES = {
+            'Processing': 'A payout is already in flight for this withdrawal.',
+            'Completed':  'This withdrawal is already completed and cannot be modified.',
+            'Rejected':   'This withdrawal was rejected. Create a new request to retry.',
+            'Failed':     'This withdrawal failed. Create a new request to retry.',
+        }
+        if withdrawal.status not in _COMPLETABLE:
             return Response(
-                {'error': 'This withdrawal is already completed and cannot be modified.'},
+                {'error': _TERMINAL_MESSAGES.get(
+                    withdrawal.status,
+                    f"Cannot complete a '{withdrawal.status}' withdrawal.",
+                )},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if withdrawal.status != 'Approved':
-            return Response(
-                {'error': f"Cannot complete a '{withdrawal.status}' withdrawal. Only Approved requests can be completed."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Pre-flight: validate MoMo prerequisites before any state change so that a
+        # validation failure never leaves the withdrawal stranded in Approved.
+        if withdrawal.payment_method == 'MoMo':
+            if not withdrawal.momo_number:
+                return Response(
+                    {'error': 'No MoMo number on record for this withdrawal.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not detect_correspondent(withdrawal.momo_number):
+                return Response(
+                    {'error': f'Unrecognized Rwanda phone prefix for number: {withdrawal.momo_number}'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Auto-approve Pending withdrawals so admins can skip the two-step flow.
+        # The "approved" email is intentionally suppressed — the producer will receive
+        # a single completion notification below, which is the meaningful one.
+        if withdrawal.status == 'Pending':
+            withdrawal.status = 'Approved'
+            withdrawal.save(update_fields=['status'])
+            _log_admin_action(request, 'approve_withdrawal', target_withdrawal=withdrawal,
+                              detail={'producer': withdrawal.producer.email, 'amount': str(withdrawal.amount),
+                                      'payment_method': withdrawal.payment_method, 'auto_approved': True})
 
         # Bank withdrawals: mark complete immediately (manual transfer)
         if withdrawal.payment_method == 'Bank':
@@ -1145,11 +1175,6 @@ class AdminWithdrawalCompleteView(AdminBaseView):
             })
 
         # MoMo withdrawals: send payout via PawaPay
-        if not withdrawal.momo_number:
-            return Response(
-                {'error': 'No MoMo number on record for this withdrawal.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         payout_id = str(uuid.uuid4())
         try:
