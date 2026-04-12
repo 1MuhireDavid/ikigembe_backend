@@ -17,7 +17,7 @@ class UserSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'phone_number',
             'first_name', 'last_name', 'full_name',
-            'avatar_url', 'is_staff', 'role', 'date_joined',
+            'avatar_url', 'is_staff', 'role', 'is_active', 'date_joined',
             'notify_new_trailers', 'notify_new_movies', 'notify_promotions',
         ]
         read_only_fields = fields
@@ -29,6 +29,7 @@ class UserSerializer(serializers.ModelSerializer):
             'avatar_url': {'help_text': 'URL to user\'s profile picture (from Google or Gravatar).'},
             'is_staff': {'help_text': 'Whether user has staff privileges.'},
             'role': {'help_text': 'User role: Admin, Producer, or Viewer.'},
+            'is_active': {'help_text': 'Whether the user account is active or deactivated.'},
             'date_joined': {'help_text': 'Date and time when the account was created.'},
             'notify_new_trailers': {'help_text': 'Receive notifications for new trailers.'},
             'notify_new_movies': {'help_text': 'Receive notifications for new movie releases.'},
