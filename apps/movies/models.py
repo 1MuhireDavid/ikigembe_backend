@@ -1,4 +1,4 @@
-from django.db import models
+from django.db import models, transaction
 from django.core.validators import FileExtensionValidator
 from django.conf import settings
 
@@ -234,11 +234,15 @@ class Subtitle(models.Model):
     def save(self, *args, **kwargs):
         if not self.language_name:
             self.language_name = dict(LANGUAGE_CHOICES).get(self.language_code, self.language_code)
-        if self.is_default:
-            Subtitle.objects.filter(
-                movie=self.movie, is_default=True
-            ).exclude(pk=self.pk).update(is_default=False)
-        super().save(*args, **kwargs)
+        with transaction.atomic():
+            if self.is_default:
+                # Lock all existing subtitle rows for this movie so concurrent
+                # writes cannot interleave the default-unsetting and the save.
+                list(Subtitle.objects.select_for_update().filter(movie_id=self.movie_id))
+                Subtitle.objects.filter(
+                    movie_id=self.movie_id, is_default=True
+                ).exclude(pk=self.pk).update(is_default=False)
+            super().save(*args, **kwargs)
 
 
 class WatchProgress(models.Model):
