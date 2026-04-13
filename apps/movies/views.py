@@ -30,6 +30,8 @@ from .serializers import (
     MyListMovieSerializer,
     WatchProgressSerializer,
     SubtitleSerializer,
+    SubtitleUploadSerializer,
+    SubtitleUpdateSerializer,
 )
 import boto3
 import uuid
@@ -731,7 +733,11 @@ class MovieDeleteView(APIView):
 # ─────────────────────────────────────────────
 
 class SubtitleListView(APIView):
-    """GET /api/movies/<id>/subtitles/ — list all subtitle tracks (public)."""
+    """
+    GET  /api/movies/<id>/subtitles/ — list all subtitle tracks (public).
+    POST /api/movies/<id>/subtitles/ — upload a new subtitle track (admin only).
+    """
+    parser_classes = [MultiPartParser, FormParser]
 
     @extend_schema(
         tags=['Movies - Subtitles'],
@@ -749,6 +755,116 @@ class SubtitleListView(APIView):
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
         subtitles = movie.subtitles.all().order_by('ordering', 'language_code')
         return Response(SubtitleSerializer(subtitles, many=True).data)
+
+    @extend_schema(
+        tags=['Movies - Subtitles'],
+        summary='Upload a subtitle track',
+        description=(
+            'Upload a .vtt or .srt subtitle file for a specific language. '
+            'Send as **multipart/form-data** with fields: `language_code`, `subtitle_file`, '
+            '`is_default` (optional), `ordering` (optional). '
+            'Only one track per language_code per movie is permitted.'
+        ),
+        request={'multipart/form-data': SubtitleUploadSerializer},
+        responses={
+            201: SubtitleSerializer,
+            400: OpenApiResponse(description='Validation error'),
+            403: OpenApiResponse(description='Admin access required'),
+            404: OpenApiResponse(description='Movie not found'),
+            409: OpenApiResponse(description='A subtitle track for this language already exists'),
+        },
+    )
+    def post(self, request, id):
+        if not request.user.is_authenticated or request.user.role != 'Admin':
+            return Response({'error': 'Admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            movie = Movie.objects.get(id=id)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = SubtitleUploadSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        from django.db import IntegrityError, transaction
+        try:
+            with transaction.atomic():
+                subtitle = serializer.save(movie=movie)
+        except IntegrityError:
+            lang = request.data.get('language_code', '')
+            return Response(
+                {'error': f'A subtitle track for "{lang}" already exists. Delete it first to replace it.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        return Response(SubtitleSerializer(subtitle).data, status=status.HTTP_201_CREATED)
+
+
+class SubtitleDetailView(APIView):
+    """
+    PATCH  /api/movies/<id>/subtitles/<subtitle_id>/ — update metadata (admin only).
+    DELETE /api/movies/<id>/subtitles/<subtitle_id>/ — remove a subtitle track (admin only).
+    """
+
+    def _get_subtitle(self, id, subtitle_id):
+        try:
+            return Subtitle.objects.get(id=subtitle_id, movie_id=id)
+        except Subtitle.DoesNotExist:
+            return None
+
+    @extend_schema(
+        tags=['Movies - Subtitles'],
+        summary='Update a subtitle track',
+        description=(
+            'Partially update a subtitle track — change language_code, language_name, '
+            'set/unset is_default, or adjust ordering. '
+            'To replace the subtitle file, delete this track and re-upload.'
+        ),
+        request=SubtitleUpdateSerializer,
+        responses={
+            200: SubtitleSerializer,
+            400: OpenApiResponse(description='Validation error'),
+            403: OpenApiResponse(description='Admin access required'),
+            404: OpenApiResponse(description='Subtitle not found'),
+        },
+    )
+    def patch(self, request, id, subtitle_id):
+        if not request.user.is_authenticated or request.user.role != 'Admin':
+            return Response({'error': 'Admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+        subtitle = self._get_subtitle(id, subtitle_id)
+        if subtitle is None:
+            return Response({'error': 'Subtitle not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = SubtitleUpdateSerializer(subtitle, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save()
+        subtitle.refresh_from_db()
+        return Response(SubtitleSerializer(subtitle).data)
+
+    @extend_schema(
+        tags=['Movies - Subtitles'],
+        summary='Delete a subtitle track',
+        description='Removes a subtitle track record. The S3 file is NOT automatically deleted.',
+        responses={
+            204: OpenApiResponse(description='Deleted'),
+            403: OpenApiResponse(description='Admin access required'),
+            404: OpenApiResponse(description='Subtitle not found'),
+        },
+    )
+    def delete(self, request, id, subtitle_id):
+        if not request.user.is_authenticated or request.user.role != 'Admin':
+            return Response({'error': 'Admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+        subtitle = self._get_subtitle(id, subtitle_id)
+        if subtitle is None:
+            return Response({'error': 'Subtitle not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        subtitle.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # ─────────────────────────────────────────────
