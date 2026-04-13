@@ -26,6 +26,11 @@ from .admin_views import (
     AdminWithdrawalSummaryView,
     AdminProducerMoviePurchasesView,
     AdminPayingUsersReportView,
+    AdminGenreRevenueView,
+    AdminHLSHealthView,
+    AdminWithdrawalPerformanceView,
+    AdminPaymentLookupView,
+    AdminPaymentResolveView,
 )
 
 urlpatterns = [
@@ -57,6 +62,13 @@ urlpatterns = [
     path('reports/user-growth/', AdminUserGrowthView.as_view(), name='admin-user-growth'),
     path('reports/withdrawal-summary/', AdminWithdrawalSummaryView.as_view(), name='admin-withdrawal-summary'),
     path('reports/paying-users/', AdminPayingUsersReportView.as_view(), name='admin-paying-users-report'),
+    path('reports/genre-revenue/', AdminGenreRevenueView.as_view(), name='admin-genre-revenue'),
+    path('reports/hls-health/', AdminHLSHealthView.as_view(), name='admin-hls-health'),
+    path('reports/withdrawal-performance/', AdminWithdrawalPerformanceView.as_view(), name='admin-withdrawal-performance'),
+
+    # Payment Dispute Resolution
+    path('payments/lookup/', AdminPaymentLookupView.as_view(), name='admin-payment-lookup'),
+    path('payments/<int:payment_id>/resolve/', AdminPaymentResolveView.as_view(), name='admin-payment-resolve'),
 
     # Withdrawal Requests
     path('withdrawals/', AdminWithdrawalsListView.as_view(), name='admin-withdrawals-list'),
