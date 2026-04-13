@@ -2,8 +2,15 @@ from django.contrib import admin
 from django.utils.html import format_html
 from django import forms
 from django.conf import settings
-from .models import Movie
+from .models import Movie, Subtitle
 from .widgets import S3DirectUploadWidget
+
+
+class SubtitleInline(admin.TabularInline):
+    model = Subtitle
+    extra = 0
+    readonly_fields = ['language_name', 'created_at']
+    fields = ['language_code', 'language_name', 'subtitle_file', 'is_default', 'ordering', 'created_at']
 
 
 class MovieAdminForm(forms.ModelForm):
@@ -25,7 +32,8 @@ class MovieAdmin(admin.ModelAdmin):
     """
     
     form = MovieAdminForm
-    
+    inlines = [SubtitleInline]
+
     # Fields to display in list view
     list_display = [
         'id',

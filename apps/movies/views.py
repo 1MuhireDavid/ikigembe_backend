@@ -21,7 +21,7 @@ from rest_framework.permissions import IsAuthenticated
 from apps.payments.models import Payment
 from .emails import send_new_movie_email, send_new_trailer_email
 from .cloudfront_signing import sign_hls_url
-from .models import Movie, WatchProgress
+from .models import Movie, WatchProgress, Subtitle
 from .serializers import (
     MovieSerializer,
     MovieDetailSerializer,
@@ -29,6 +29,9 @@ from .serializers import (
     MovieCreateSerializer,
     MyListMovieSerializer,
     WatchProgressSerializer,
+    SubtitleSerializer,
+    SubtitleUploadSerializer,
+    SubtitleUpdateSerializer,
 )
 import boto3
 import uuid
@@ -99,7 +102,7 @@ class DiscoverMoviesView(APIView):
     )
     def get(self, request):
         sort_by = request.GET.get('sort_by', 'popularity.desc')
-        movies = Movie.objects.filter(is_active=True)
+        movies = Movie.objects.filter(is_active=True).prefetch_related('subtitles')
 
         order_map = {
             'popularity.desc': '-views',
@@ -155,7 +158,7 @@ class MovieSearchView(APIView):
             Q(genres_text__icontains=q) |
             Q(cast_text__icontains=q),
             is_active=True,
-        ).order_by('-views')
+        ).prefetch_related('subtitles').order_by('-views')
 
         page, total, movies_page = _paginate(movies, request)
         return Response({
@@ -183,7 +186,7 @@ class PopularMoviesView(APIView):
         description='Get a list of the most viewed movies.',
     )
     def get(self, request):
-        movies = Movie.objects.filter(is_active=True).order_by('-views')
+        movies = Movie.objects.filter(is_active=True).prefetch_related('subtitles').order_by('-views')
         page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
@@ -210,7 +213,7 @@ class NowPlayingMoviesView(APIView):
         description='Get a list of recently added movies.',
     )
     def get(self, request):
-        movies = Movie.objects.filter(is_active=True).order_by('-created_at')
+        movies = Movie.objects.filter(is_active=True).prefetch_related('subtitles').order_by('-created_at')
         page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
@@ -237,7 +240,7 @@ class TopRatedMoviesView(APIView):
         description='Get a list of the highest rated movies (rating >= 4.0).',
     )
     def get(self, request):
-        movies = Movie.objects.filter(is_active=True, rating__gte=4.0).order_by('-rating')
+        movies = Movie.objects.filter(is_active=True, rating__gte=4.0).prefetch_related('subtitles').order_by('-rating')
         page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
@@ -265,7 +268,7 @@ class UpcomingMoviesView(APIView):
     )
     def get(self, request):
         today = timezone.now().date()
-        movies = Movie.objects.filter(is_active=True, release_date__gte=today).order_by('release_date')
+        movies = Movie.objects.filter(is_active=True, release_date__gte=today).prefetch_related('subtitles').order_by('release_date')
         page, total, movies_page = _paginate(movies, request)
         return Response({
             'page': page,
@@ -298,7 +301,7 @@ class MovieDetailView(APIView):
     )
     def get(self, request, id):
         try:
-            movie = Movie.objects.get(id=id)
+            movie = Movie.objects.prefetch_related('subtitles').get(id=id)
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -410,7 +413,9 @@ class MovieStreamView(APIView):
 
         movie.increment_views()
         serializer = MovieVideoAccessSerializer(movie, context={'request': request})
-        subtitles_url = movie.subtitles_file.url if movie.subtitles_file else None
+        subtitles = SubtitleSerializer(
+            movie.subtitles.all().order_by('ordering', 'language_code'), many=True
+        ).data
         if movie.hls_status == 'ready' and movie.hls_url:
             return Response({
                 'movie': serializer.data,
@@ -418,7 +423,7 @@ class MovieStreamView(APIView):
                 'stream_type': 'hls',
                 'hls_status': movie.hls_status,
                 'fallback_url': movie.video_url,
-                'subtitles_url': subtitles_url,
+                'subtitles': subtitles,
             })
         return Response({
             'movie': serializer.data,
@@ -426,7 +431,7 @@ class MovieStreamView(APIView):
             'stream_type': 'mp4',
             'hls_status': movie.hls_status,
             'fallback_url': None,
-            'subtitles_url': subtitles_url,
+            'subtitles': subtitles,
         })
 
 
@@ -724,6 +729,140 @@ class MovieDeleteView(APIView):
 
 
 # ─────────────────────────────────────────────
+# Subtitle endpoints
+# ─────────────────────────────────────────────
+
+class SubtitleListView(APIView):
+    """
+    GET  /api/movies/<id>/subtitles/  — list all subtitle tracks (public)
+    POST /api/movies/<id>/subtitles/  — upload a new subtitle track (Admin only)
+    """
+
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAdminRole()]
+        return []
+
+    def get_parsers(self):
+        if self.request.method == 'POST':
+            return [MultiPartParser(), FormParser()]
+        return super().get_parsers()
+
+    @extend_schema(
+        tags=['Movies - Subtitles'],
+        summary='List subtitle tracks',
+        description='Returns all subtitle tracks for a movie, ordered by display order then language code.',
+        responses={
+            200: SubtitleSerializer(many=True),
+            404: OpenApiResponse(description='Movie not found'),
+        },
+    )
+    def get(self, request, id):
+        try:
+            movie = Movie.objects.get(id=id, is_active=True)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+        subtitles = movie.subtitles.all().order_by('ordering', 'language_code')
+        return Response(SubtitleSerializer(subtitles, many=True).data)
+
+    @extend_schema(
+        tags=['Movies - Subtitles'],
+        summary='Upload a subtitle track',
+        description=(
+            'Upload a .vtt or .srt subtitle file for a specific language. '
+            'Send as **multipart/form-data** with fields: `language_code`, `subtitle_file`, '
+            '`is_default` (optional), `ordering` (optional). '
+            'Only one track per language per movie is allowed — '
+            'DELETE the existing one first before re-uploading.'
+        ),
+        request={'multipart/form-data': SubtitleUploadSerializer},
+        responses={
+            201: SubtitleSerializer,
+            400: OpenApiResponse(description='Validation error'),
+            403: OpenApiResponse(description='Admin access required'),
+            404: OpenApiResponse(description='Movie not found'),
+            409: OpenApiResponse(description='Subtitle for this language already exists'),
+        },
+    )
+    def post(self, request, id):
+        try:
+            movie = Movie.objects.get(id=id)
+        except Movie.DoesNotExist:
+            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        lang = request.data.get('language_code', '')
+        if Subtitle.objects.filter(movie=movie, language_code=lang).exists():
+            return Response(
+                {'error': f'A subtitle track for "{lang}" already exists. Delete it first to replace it.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        serializer = SubtitleUploadSerializer(data=request.data)
+        if serializer.is_valid():
+            subtitle = serializer.save(movie=movie)
+            return Response(SubtitleSerializer(subtitle).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SubtitleDetailView(APIView):
+    """
+    PATCH  /api/movies/<id>/subtitles/<subtitle_id>/  — update metadata (Admin only)
+    DELETE /api/movies/<id>/subtitles/<subtitle_id>/  — remove a subtitle track (Admin only)
+    """
+    permission_classes = [IsAdminRole]
+
+    def _get_subtitle(self, movie_id, subtitle_id):
+        try:
+            return Subtitle.objects.select_related('movie').get(id=subtitle_id, movie_id=movie_id)
+        except Subtitle.DoesNotExist:
+            return None
+
+    @extend_schema(
+        tags=['Movies - Subtitles'],
+        summary='Update a subtitle track',
+        description=(
+            'Partially update a subtitle track — change language_code, language_name, '
+            'set/unset is_default, or change ordering. '
+            'To replace the subtitle file itself, delete and re-upload.'
+        ),
+        request=SubtitleUpdateSerializer,
+        responses={
+            200: SubtitleSerializer,
+            400: OpenApiResponse(description='Validation error'),
+            403: OpenApiResponse(description='Admin access required'),
+            404: OpenApiResponse(description='Subtitle not found'),
+        },
+    )
+    def patch(self, request, id, subtitle_id):
+        subtitle = self._get_subtitle(id, subtitle_id)
+        if subtitle is None:
+            return Response({'error': 'Subtitle not found'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = SubtitleUpdateSerializer(subtitle, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            subtitle.refresh_from_db()
+            return Response(SubtitleSerializer(subtitle).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @extend_schema(
+        tags=['Movies - Subtitles'],
+        summary='Delete a subtitle track',
+        description='Removes a subtitle track record. The S3 file is NOT automatically deleted.',
+        responses={
+            204: OpenApiResponse(description='Deleted'),
+            403: OpenApiResponse(description='Admin access required'),
+            404: OpenApiResponse(description='Subtitle not found'),
+        },
+    )
+    def delete(self, request, id, subtitle_id):
+        subtitle = self._get_subtitle(id, subtitle_id)
+        if subtitle is None:
+            return Response({'error': 'Subtitle not found'}, status=status.HTTP_404_NOT_FOUND)
+        subtitle.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ─────────────────────────────────────────────
 # S3 Multipart Upload — Admin only
 # ─────────────────────────────────────────────
 
@@ -994,7 +1133,7 @@ class MyListView(APIView):
             user=request.user, status='Completed'
         ).values_list('movie_id', flat=True)
 
-        movies = Movie.objects.filter(id__in=paid_movie_ids, is_active=True)
+        movies = Movie.objects.filter(id__in=paid_movie_ids, is_active=True).prefetch_related('subtitles')
 
         # Fetch all progress records for this user in one query.
         progress_map = {
