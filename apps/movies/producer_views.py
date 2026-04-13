@@ -1,5 +1,5 @@
 from django.db import transaction
-from django.db.models import Sum, Count, Q
+from django.db.models import Sum, Count, Q, Avg, ExpressionWrapper, FloatField, F
 from django.db.models.functions import Coalesce, TruncDay, TruncMonth, TruncWeek
 from django.utils import timezone
 from datetime import timedelta
@@ -378,15 +378,21 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
             for p in payments[start:start + page_size]
         ]
 
-        # Watch completion stats from WatchProgress
+        # Watch completion stats from WatchProgress — all aggregated in the DB,
+        # no rows materialised into Python memory.
         watch_qs = WatchProgress.objects.filter(movie=movie)
         total_watchers = watch_qs.count()
         completed_count = watch_qs.filter(completed=True).count()
         completion_rate_pct = round(completed_count * 100 / total_watchers, 1) if total_watchers else 0.0
-        timed_records = list(watch_qs.filter(duration_seconds__gt=0).values_list('progress_seconds', 'duration_seconds'))
-        avg_progress_pct = round(
-            sum(p / d * 100 for p, d in timed_records) / len(timed_records), 1
-        ) if timed_records else 0.0
+        avg_result = watch_qs.filter(duration_seconds__gt=0).aggregate(
+            avg_pct=Avg(
+                ExpressionWrapper(
+                    F('progress_seconds') * 100.0 / F('duration_seconds'),
+                    output_field=FloatField(),
+                )
+            )
+        )
+        avg_progress_pct = round(avg_result['avg_pct'] or 0.0, 1)
 
         return Response({
             'movie_id': movie.id,

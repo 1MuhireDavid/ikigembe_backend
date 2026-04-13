@@ -27,7 +27,7 @@ from apps.movies.models import Movie
 from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet, producer_split
 from apps.payments.pawapay import initiate_payout, detect_correspondent
-from apps.payments.emails import send_withdrawal_status_email
+from apps.payments.emails import send_withdrawal_status_email, send_payment_completed_email
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +376,10 @@ class AdminViewerPaymentsView(AdminBaseView):
     )
     def get(self, request, user_id):
         user = get_object_or_404(User, id=user_id, role='Viewer')
+        _log_admin_action(
+            request, 'view_viewer_pii', target_user=user,
+            detail={'viewer_id': user.id, 'reason': 'payment history / dispute lookup'},
+        )
         payments = Payment.objects.filter(user=user).select_related('movie').order_by('-created_at')
         data = [
             {
@@ -2061,23 +2065,40 @@ class AdminGenreRevenueView(AdminBaseView):
     def get(self, request):
         since, until = _parse_date_range(request, default_days=365)
 
-        payments = (
-            Payment.objects
-            .filter(status='Completed', created_at__gte=since, created_at__lte=until)
-            .select_related('movie')
-        )
+        # Step 1: aggregate revenue + count per movie in the DB — one row per movie,
+        # not one row per payment. This is O(movies with sales) instead of O(payments).
+        movie_stats = {
+            row['movie_id']: {'revenue': row['total'], 'count': row['count']}
+            for row in (
+                Payment.objects
+                .filter(
+                    status='Completed',
+                    created_at__gte=since,
+                    created_at__lte=until,
+                    movie__isnull=False,
+                )
+                .values('movie_id')
+                .annotate(total=Sum('amount'), count=Count('id'))
+            )
+        }
 
-        # Python-level aggregation: ORM cannot GROUP BY individual JSON array elements
+        if not movie_stats:
+            return Response({'results': []})
+
+        # Step 2: fetch genres for only the movies that had sales — one query.
+        # ORM cannot GROUP BY JSON array elements so we expand genres in Python,
+        # but now we iterate movies (small set) rather than payments (large set).
+        movies = Movie.objects.filter(id__in=movie_stats.keys()).values('id', 'genres')
+
         genre_stats = {}
-        for payment in payments:
-            if not payment.movie:
-                continue
-            for genre in (payment.movie.genres or []):
+        for movie in movies:
+            stats = movie_stats[movie['id']]
+            for genre in (movie['genres'] or []):
                 if genre not in genre_stats:
                     genre_stats[genre] = {'revenue': 0, 'count': 0, 'movie_ids': set()}
-                genre_stats[genre]['revenue'] += payment.amount
-                genre_stats[genre]['count'] += 1
-                genre_stats[genre]['movie_ids'].add(payment.movie_id)
+                genre_stats[genre]['revenue'] += stats['revenue']
+                genre_stats[genre]['count'] += stats['count']
+                genre_stats[genre]['movie_ids'].add(movie['id'])
 
         results = []
         for genre, stats in genre_stats.items():
@@ -2271,9 +2292,18 @@ class AdminWithdrawalPerformanceView(AdminBaseView):
     def get(self, request):
         since, until = _parse_date_range(request, default_days=90)
 
+        # Only include terminal statuses so total_processed, success_rate_pct, and
+        # avg_processing_hours are all computed over the same consistent set of records.
+        # Approved/Processing have processed_at set but are not yet resolved — including
+        # them would inflate total_processed while the success/failure counts stay lower.
         qs = list(
             WithdrawalRequest.objects
-            .filter(processed_at__isnull=False, created_at__gte=since, created_at__lte=until)
+            .filter(
+                status__in=['Completed', 'Rejected', 'Failed'],
+                processed_at__isnull=False,
+                created_at__gte=since,
+                created_at__lte=until,
+            )
             .only('status', 'payment_method', 'created_at', 'processed_at')
         )
 
@@ -2385,11 +2415,22 @@ class AdminPaymentLookupView(AdminBaseView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        qs = Payment.objects.select_related('user', 'movie')
+        # Build filter from whichever params are present (AND when both supplied).
+        # deposit_id is unique-indexed — exact match is instant.
+        # phone_number uses startswith so a numeric prefix scan is selective enough
+        # without a full-table icontains scan.
+        filters = Q()
         if deposit_id:
-            qs = qs.filter(deposit_id=deposit_id)
-        elif phone_number:
-            qs = qs.filter(phone_number__icontains=phone_number)
+            filters &= Q(deposit_id=deposit_id)
+        if phone_number:
+            filters &= Q(phone_number__startswith=phone_number)
+
+        qs = (
+            Payment.objects
+            .filter(filters)
+            .select_related('user', 'movie')
+            .order_by('-created_at')[:50]
+        )
 
         results = [
             {
@@ -2406,7 +2447,7 @@ class AdminPaymentLookupView(AdminBaseView):
                 'phone_number': p.phone_number,
                 'created_at': p.created_at,
             }
-            for p in qs.order_by('-created_at')
+            for p in qs
         ]
 
         return Response({'results': results})
@@ -2466,6 +2507,8 @@ class AdminPaymentResolveView(AdminBaseView):
         previous_status = payment.status
         payment.status = 'Completed'
         payment.save(update_fields=['status'])
+
+        send_payment_completed_email(payment)
 
         _log_admin_action(
             request,
