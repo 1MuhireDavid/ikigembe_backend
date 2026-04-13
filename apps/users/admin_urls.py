@@ -31,6 +31,8 @@ from .admin_views import (
     AdminWithdrawalPerformanceView,
     AdminPaymentLookupView,
     AdminPaymentResolveView,
+    AdminMovieSubtitleListView,
+    AdminMovieSubtitleDetailView,
 )
 
 urlpatterns = [
@@ -81,4 +83,8 @@ urlpatterns = [
 
     # Password reset (for phone-only accounts)
     path('users/<int:user_id>/reset-password/', AdminUserResetPasswordView.as_view(), name='admin-user-reset-password'),
+
+    # Movie Subtitle Management
+    path('movies/<int:movie_id>/subtitles/', AdminMovieSubtitleListView.as_view(), name='admin-movie-subtitles'),
+    path('movies/<int:movie_id>/subtitles/<int:subtitle_id>/', AdminMovieSubtitleDetailView.as_view(), name='admin-movie-subtitle-detail'),
 ]

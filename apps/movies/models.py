@@ -1,6 +1,27 @@
-from django.db import models
+from django.db import models, transaction
 from django.core.validators import FileExtensionValidator
 from django.conf import settings
+
+
+LANGUAGE_CHOICES = [
+    ('en', 'English'),
+    ('fr', 'French'),
+    ('rw', 'Kinyarwanda'),
+    ('sw', 'Swahili'),
+    ('ar', 'Arabic'),
+    ('es', 'Spanish'),
+    ('pt', 'Portuguese'),
+    ('zh', 'Chinese'),
+    ('de', 'German'),
+    ('it', 'Italian'),
+]
+
+
+def _subtitle_upload_path(instance, filename):
+    import os
+    import uuid
+    ext = os.path.splitext(filename)[1]
+    return f'movies/subtitles/{instance.movie_id}/{uuid.uuid4()}{ext}'
 
 
 class Movie(models.Model):
@@ -164,6 +185,64 @@ class Movie(models.Model):
         if self.hls_status == 'ready' and self.hls_master_key:
             return f"https://{settings.AWS_S3_CUSTOM_DOMAIN}/{self.hls_master_key}"
         return None
+
+
+class Subtitle(models.Model):
+    """
+    A single subtitle track for a movie in a specific language.
+    A movie can have one track per language_code.
+    """
+    movie = models.ForeignKey(
+        Movie,
+        on_delete=models.CASCADE,
+        related_name='subtitles',
+    )
+    language_code = models.CharField(
+        max_length=10,
+        choices=LANGUAGE_CHOICES,
+        help_text='ISO 639-1 language code, e.g. "en", "fr", "rw"',
+    )
+    language_name = models.CharField(
+        max_length=100,
+        help_text='Human-readable name — auto-populated from language_code if blank.',
+    )
+    subtitle_file = models.FileField(
+        upload_to=_subtitle_upload_path,
+        validators=[FileExtensionValidator(allowed_extensions=['vtt', 'srt'])],
+        help_text='Subtitle file in VTT or SRT format',
+    )
+    is_default = models.BooleanField(
+        default=False,
+        help_text='Pre-selected track in the player',
+    )
+    ordering = models.PositiveSmallIntegerField(
+        default=0,
+        help_text='Display order in the subtitle track selector',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['ordering', 'language_code']
+        unique_together = [('movie', 'language_code')]
+        verbose_name = 'Subtitle'
+        verbose_name_plural = 'Subtitles'
+
+    def __str__(self):
+        return f'{self.movie.title} — {self.language_name} ({self.language_code})'
+
+    def save(self, *args, **kwargs):
+        if not self.language_name:
+            self.language_name = dict(LANGUAGE_CHOICES).get(self.language_code, self.language_code)
+        with transaction.atomic():
+            if self.is_default:
+                # Lock all existing subtitle rows for this movie so concurrent
+                # writes cannot interleave the default-unsetting and the save.
+                list(Subtitle.objects.select_for_update().filter(movie_id=self.movie_id))
+                Subtitle.objects.filter(
+                    movie_id=self.movie_id, is_default=True
+                ).exclude(pk=self.pk).update(is_default=False)
+            super().save(*args, **kwargs)
 
 
 class WatchProgress(models.Model):
