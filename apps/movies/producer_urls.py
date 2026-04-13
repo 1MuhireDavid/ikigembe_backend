@@ -8,8 +8,6 @@ from .producer_views import (
     ProducerEarningsReportView,
     ProducerTransactionHistoryView,
     ProducerReportView,
-    ProducerRevenueTrendView,
-    ProducerMoviePurchasesView,
 )
 
 urlpatterns = [
@@ -21,6 +19,4 @@ urlpatterns = [
     path('earnings/report/', ProducerEarningsReportView.as_view(), name='producer-earnings-report'),
     path('transactions/', ProducerTransactionHistoryView.as_view(), name='producer-transactions'),
     path('report/', ProducerReportView.as_view(), name='producer-report'),
-    path('revenue-trend/', ProducerRevenueTrendView.as_view(), name='producer-revenue-trend'),
-    path('movies/<int:id>/purchases/', ProducerMoviePurchasesView.as_view(), name='producer-movie-purchases'),
 ]

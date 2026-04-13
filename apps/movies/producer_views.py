@@ -11,7 +11,7 @@ from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiParam
 from drf_spectacular.types import OpenApiTypes
 
 from apps.users.permissions import IsProducerRole
-from apps.movies.models import Movie
+from apps.movies.models import Movie, WatchProgress
 from apps.movies.serializers import ProducerMovieListSerializer, ProducerMovieDetailSerializer
 from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import WithdrawalRequestSerializer, get_producer_wallet, producer_split
@@ -205,144 +205,6 @@ class ProducerReportView(ProducerBaseView):
         })
 
 
-class ProducerMoviePurchasesView(ProducerBaseView):
-    @extend_schema(
-        tags=[_REPORTS_TAG],
-        summary='Paginated purchase history for one of my movies',
-        description=(
-            'Returns completed purchases for the given movie (must belong to the authenticated producer), '
-            'newest first. Buyer identity is not exposed.'
-        ),
-        parameters=[
-            OpenApiParameter(
-                name='page',
-                type=OpenApiTypes.INT,
-                location=OpenApiParameter.QUERY,
-                required=False,
-                default=1,
-                description='Page number (20 results per page)',
-            ),
-        ],
-        responses={
-            200: inline_serializer(
-                name='ProducerMoviePurchaseList',
-                fields={
-                    'page': drf_serializers.IntegerField(),
-                    'total_results': drf_serializers.IntegerField(),
-                    'total_pages': drf_serializers.IntegerField(),
-                    'results': inline_serializer(
-                        name='ProducerMoviePurchaseItem',
-                        fields={
-                            'amount': drf_serializers.IntegerField(),
-                            'status': drf_serializers.CharField(),
-                            'purchased_at': drf_serializers.DateTimeField(),
-                        },
-                        many=True,
-                    ),
-                },
-            ),
-            401: OpenApiResponse(description='Authentication credentials not provided'),
-            403: OpenApiResponse(description='Producer role required'),
-            404: OpenApiResponse(description='Movie not found or not owned by this producer'),
-        },
-    )
-    def get(self, request, id):
-        try:
-            movie = Movie.objects.get(id=id, producer_profile=request.user)
-        except Movie.DoesNotExist:
-            return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        qs = Payment.objects.filter(movie=movie, status='Completed').order_by('-created_at')
-        page = _safe_page(request)
-        page_size = 20
-        start = (page - 1) * page_size
-        total = qs.count()
-
-        results = [
-            {'amount': p.amount, 'status': p.status, 'purchased_at': p.created_at}
-            for p in qs[start:start + page_size]
-        ]
-
-        return Response({
-            'page': page,
-            'total_results': total,
-            'total_pages': (total + page_size - 1) // page_size,
-            'results': results,
-        })
-
-
-class ProducerRevenueTrendView(ProducerBaseView):
-    @extend_schema(
-        tags=[_REPORTS_TAG],
-        summary='My monthly revenue trend',
-        description=(
-            'Returns month-by-month earnings for the authenticated producer over the last N months. '
-            '`producer_share` is 70% of `total_revenue` for each month. '
-            'Months with no sales are omitted.'
-        ),
-        parameters=[
-            OpenApiParameter(
-                name='months',
-                type=OpenApiTypes.INT,
-                location=OpenApiParameter.QUERY,
-                required=False,
-                default=12,
-                description='How many months back to include (default 12)',
-            ),
-        ],
-        responses={
-            200: inline_serializer(
-                name='ProducerRevenueTrend',
-                fields={
-                    'trend': inline_serializer(
-                        name='ProducerRevenueTrendItem',
-                        fields={
-                            'month': drf_serializers.DateTimeField(help_text='First day of the month (UTC)'),
-                            'total_revenue': drf_serializers.IntegerField(help_text='Gross revenue from purchases that month (RWF)'),
-                            'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
-                            'purchase_count': drf_serializers.IntegerField(),
-                        },
-                        many=True,
-                    ),
-                },
-            ),
-            401: OpenApiResponse(description='Authentication credentials not provided'),
-            403: OpenApiResponse(description='Producer role required'),
-        },
-    )
-    def get(self, request):
-        try:
-            months = min(max(1, int(request.GET.get('months', 12))), 24)
-        except (TypeError, ValueError):
-            months = 12
-
-        since = timezone.now() - timedelta(days=months * 31)
-
-        rows = (
-            Payment.objects
-            .filter(
-                movie__producer_profile=request.user,
-                status='Completed',
-                created_at__gte=since,
-            )
-            .annotate(month=TruncMonth('created_at'))
-            .values('month')
-            .annotate(total_revenue=Sum('amount'), purchase_count=Count('id'))
-            .order_by('month')
-        )
-
-        trend = [
-            {
-                'month': row['month'],
-                'total_revenue': row['total_revenue'],
-                'producer_share': (row['total_revenue'] * 70) // 100,
-                'purchase_count': row['purchase_count'],
-            }
-            for row in rows
-        ]
-
-        return Response({'trend': trend})
-
 
 class ProducerWithdrawalsView(ProducerBaseView):
     @extend_schema(
@@ -462,6 +324,15 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
                     'gross_revenue': drf_serializers.IntegerField(help_text='Sum of all completed payments (RWF)'),
                     'ikigembe_commission': drf_serializers.IntegerField(help_text='30% platform share (RWF)'),
                     'producer_earnings': drf_serializers.IntegerField(help_text='70% producer share (RWF)'),
+                    'watch_stats': inline_serializer(
+                        name='WatchStats',
+                        fields={
+                            'total_watchers': drf_serializers.IntegerField(help_text='Users who started watching'),
+                            'completed_count': drf_serializers.IntegerField(help_text='Users who finished the movie'),
+                            'completion_rate_pct': drf_serializers.FloatField(help_text='% of watchers who finished'),
+                            'avg_progress_pct': drf_serializers.FloatField(help_text='Average % of the movie watched across all watchers'),
+                        },
+                    ),
                     'page': drf_serializers.IntegerField(),
                     'total_results': drf_serializers.IntegerField(),
                     'total_pages': drf_serializers.IntegerField(),
@@ -507,6 +378,16 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
             for p in payments[start:start + page_size]
         ]
 
+        # Watch completion stats from WatchProgress
+        watch_qs = WatchProgress.objects.filter(movie=movie)
+        total_watchers = watch_qs.count()
+        completed_count = watch_qs.filter(completed=True).count()
+        completion_rate_pct = round(completed_count * 100 / total_watchers, 1) if total_watchers else 0.0
+        timed_records = list(watch_qs.filter(duration_seconds__gt=0).values_list('progress_seconds', 'duration_seconds'))
+        avg_progress_pct = round(
+            sum(p / d * 100 for p, d in timed_records) / len(timed_records), 1
+        ) if timed_records else 0.0
+
         return Response({
             'movie_id': movie.id,
             'title': movie.title,
@@ -515,6 +396,12 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
             'gross_revenue': gross,
             'ikigembe_commission': commission,
             'producer_earnings': earnings,
+            'watch_stats': {
+                'total_watchers': total_watchers,
+                'completed_count': completed_count,
+                'completion_rate_pct': completion_rate_pct,
+                'avg_progress_pct': avg_progress_pct,
+            },
             'page': page,
             'total_results': total,
             'total_pages': (total + page_size - 1) // page_size,

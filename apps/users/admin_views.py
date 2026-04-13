@@ -25,7 +25,7 @@ from apps.users.permissions import IsAdminRole
 from apps.users.serializers import AdminCreateProducerSerializer
 from apps.movies.models import Movie
 from apps.payments.models import Payment, WithdrawalRequest
-from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet
+from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet, producer_split
 from apps.payments.pawapay import initiate_payout, detect_correspondent
 from apps.payments.emails import send_withdrawal_status_email
 
@@ -350,7 +350,11 @@ class AdminViewerPaymentsView(AdminBaseView):
     @extend_schema(
         tags=[_TAG],
         summary="A specific viewer's payment history",
-        description='Returns all movie purchases made by the given viewer, newest first.',
+        description=(
+            'Returns all movie purchases made by the given viewer, newest first. '
+            'Includes `deposit_id` and `phone_number` so admins can cross-check against '
+            'PawaPay receipts when a viewer disputes a failed or missing payment.'
+        ),
         responses={
             200: inline_serializer(
                 name='ViewerPaymentItem',
@@ -359,6 +363,8 @@ class AdminViewerPaymentsView(AdminBaseView):
                     'movie_title': drf_serializers.CharField(),
                     'amount': drf_serializers.IntegerField(help_text='Amount paid in RWF'),
                     'status': drf_serializers.CharField(help_text='Pending | Completed | Failed'),
+                    'deposit_id': drf_serializers.CharField(allow_null=True, help_text='PawaPay transaction reference from viewer receipt'),
+                    'phone_number': drf_serializers.CharField(allow_null=True, help_text='Phone number used for the payment'),
                     'created_at': drf_serializers.DateTimeField(),
                 },
                 many=True,
@@ -371,15 +377,18 @@ class AdminViewerPaymentsView(AdminBaseView):
     def get(self, request, user_id):
         user = get_object_or_404(User, id=user_id, role='Viewer')
         payments = Payment.objects.filter(user=user).select_related('movie').order_by('-created_at')
-        data = []
-        for p in payments:
-            data.append({
+        data = [
+            {
                 'id': p.id,
                 'movie_title': p.movie.title if p.movie else 'Unknown',
                 'amount': p.amount,
                 'status': p.status,
-                'created_at': p.created_at
-            })
+                'deposit_id': p.deposit_id,
+                'phone_number': p.phone_number,
+                'created_at': p.created_at,
+            }
+            for p in payments
+        ]
         return Response(data)
 
 
@@ -1305,7 +1314,7 @@ class AdminAuditLogView(AdminBaseView):
                 enum=[
                     'suspend_user', 'delete_user', 'approve_producer', 'suspend_producer',
                     'create_producer', 'approve_withdrawal', 'complete_withdrawal', 'reject_withdrawal',
-                    'reset_user_password',
+                    'reset_user_password', 'view_viewer_pii', 'resolve_payment',
                 ],
                 description='Filter by action type',
             ),
@@ -1995,3 +2004,488 @@ class AdminWithdrawalSummaryView(AdminBaseView):
         ]
 
         return Response({'trend': trend})
+
+
+# ─────────────────────────────────────────────
+# Report: Genre Revenue Breakdown
+# ─────────────────────────────────────────────
+
+class AdminGenreRevenueView(AdminBaseView):
+    @extend_schema(
+        tags=[_REPORTS_TAG],
+        summary='Revenue breakdown by genre',
+        description=(
+            'Returns total revenue, producer share, and purchase count grouped by movie genre. '
+            'Movies may appear in multiple genres — each payment is counted once per genre on that movie. '
+            'Genres with no completed payments in the date range are omitted. '
+            'Sorted by total revenue descending.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='start_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Start of date range (YYYY-MM-DD). Defaults to 365 days ago.',
+            ),
+            OpenApiParameter(
+                name='end_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='End of date range inclusive (YYYY-MM-DD). Defaults to today.',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='AdminGenreRevenue',
+                fields={
+                    'results': inline_serializer(
+                        name='AdminGenreRevenueItem',
+                        fields={
+                            'genre': drf_serializers.CharField(),
+                            'total_revenue': drf_serializers.IntegerField(help_text='Sum of completed payments for movies in this genre (RWF)'),
+                            'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
+                            'ikigembe_commission': drf_serializers.IntegerField(help_text='30% of total_revenue (RWF)'),
+                            'purchase_count': drf_serializers.IntegerField(help_text='Number of completed purchases'),
+                            'movie_count': drf_serializers.IntegerField(help_text='Number of distinct movies in this genre that had sales'),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        since, until = _parse_date_range(request, default_days=365)
+
+        payments = (
+            Payment.objects
+            .filter(status='Completed', created_at__gte=since, created_at__lte=until)
+            .select_related('movie')
+        )
+
+        # Python-level aggregation: ORM cannot GROUP BY individual JSON array elements
+        genre_stats = {}
+        for payment in payments:
+            if not payment.movie:
+                continue
+            for genre in (payment.movie.genres or []):
+                if genre not in genre_stats:
+                    genre_stats[genre] = {'revenue': 0, 'count': 0, 'movie_ids': set()}
+                genre_stats[genre]['revenue'] += payment.amount
+                genre_stats[genre]['count'] += 1
+                genre_stats[genre]['movie_ids'].add(payment.movie_id)
+
+        results = []
+        for genre, stats in genre_stats.items():
+            producer_share, commission = producer_split(stats['revenue'])
+            results.append({
+                'genre': genre,
+                'total_revenue': stats['revenue'],
+                'producer_share': producer_share,
+                'ikigembe_commission': commission,
+                'purchase_count': stats['count'],
+                'movie_count': len(stats['movie_ids']),
+            })
+
+        results.sort(key=lambda x: x['total_revenue'], reverse=True)
+        return Response({'results': results})
+
+
+# ─────────────────────────────────────────────
+# Report: HLS Health
+# ─────────────────────────────────────────────
+
+class AdminHLSHealthView(AdminBaseView):
+    @extend_schema(
+        tags=[_REPORTS_TAG],
+        summary='HLS video conversion health report',
+        description=(
+            'Returns a breakdown of movie HLS transcoding statuses across the platform. '
+            'Highlights failed conversions (with error messages) and movies stuck in processing '
+            '(with hours elapsed since conversion started). '
+            '`success_rate_pct` is calculated over movies that have attempted conversion (ready + failed).'
+        ),
+        responses={
+            200: inline_serializer(
+                name='AdminHLSHealth',
+                fields={
+                    'summary': inline_serializer(
+                        name='AdminHLSSummary',
+                        fields={
+                            'total_movies': drf_serializers.IntegerField(),
+                            'not_started': drf_serializers.IntegerField(),
+                            'processing': drf_serializers.IntegerField(),
+                            'ready': drf_serializers.IntegerField(),
+                            'failed': drf_serializers.IntegerField(),
+                            'success_rate_pct': drf_serializers.IntegerField(help_text='ready ÷ (ready + failed) × 100; null if no conversions attempted'),
+                        },
+                    ),
+                    'failed_movies': inline_serializer(
+                        name='AdminHLSFailedMovie',
+                        fields={
+                            'id': drf_serializers.IntegerField(),
+                            'title': drf_serializers.CharField(),
+                            'producer': drf_serializers.CharField(allow_null=True),
+                            'error': drf_serializers.CharField(allow_null=True),
+                            'started_at': drf_serializers.DateTimeField(allow_null=True),
+                        },
+                        many=True,
+                    ),
+                    'stuck_processing': inline_serializer(
+                        name='AdminHLSStuckMovie',
+                        fields={
+                            'id': drf_serializers.IntegerField(),
+                            'title': drf_serializers.CharField(),
+                            'producer': drf_serializers.CharField(allow_null=True),
+                            'started_at': drf_serializers.DateTimeField(allow_null=True),
+                            'hours_stuck': drf_serializers.FloatField(allow_null=True, help_text='Hours since HLS conversion started'),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        status_counts = {
+            row['hls_status']: row['count']
+            for row in Movie.objects.values('hls_status').annotate(count=Count('id'))
+        }
+
+        not_started = status_counts.get('not_started', 0)
+        processing = status_counts.get('processing', 0)
+        ready = status_counts.get('ready', 0)
+        failed = status_counts.get('failed', 0)
+        total = not_started + processing + ready + failed
+        attempted = ready + failed
+        success_rate_pct = (ready * 100 // attempted) if attempted else None
+
+        failed_movies = [
+            {
+                'id': m.id,
+                'title': m.title,
+                'producer': m.producer_profile.full_name if m.producer_profile else None,
+                'error': m.hls_error_message,
+                'started_at': m.hls_started_at,
+            }
+            for m in Movie.objects.filter(hls_status='failed').select_related('producer_profile')
+        ]
+
+        now = timezone.now()
+        stuck_processing = [
+            {
+                'id': m.id,
+                'title': m.title,
+                'producer': m.producer_profile.full_name if m.producer_profile else None,
+                'started_at': m.hls_started_at,
+                'hours_stuck': round((now - m.hls_started_at).total_seconds() / 3600, 1) if m.hls_started_at else None,
+            }
+            for m in Movie.objects.filter(hls_status='processing').select_related('producer_profile')
+        ]
+
+        return Response({
+            'summary': {
+                'total_movies': total,
+                'not_started': not_started,
+                'processing': processing,
+                'ready': ready,
+                'failed': failed,
+                'success_rate_pct': success_rate_pct,
+            },
+            'failed_movies': failed_movies,
+            'stuck_processing': stuck_processing,
+        })
+
+
+# ─────────────────────────────────────────────
+# Report: Withdrawal Processing Performance
+# ─────────────────────────────────────────────
+
+class AdminWithdrawalPerformanceView(AdminBaseView):
+    @extend_schema(
+        tags=[_REPORTS_TAG],
+        summary='Withdrawal payout processing performance',
+        description=(
+            'Returns processing speed and success rates for withdrawal requests that have been actioned '
+            '(approved, completed, rejected, or failed). '
+            'Broken down overall and by payment method (Bank / MoMo). '
+            '`avg_processing_hours` measures time from request creation to final action.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='start_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Start of date range (YYYY-MM-DD). Defaults to 90 days ago.',
+            ),
+            OpenApiParameter(
+                name='end_date',
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='End of date range inclusive (YYYY-MM-DD). Defaults to today.',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='AdminWithdrawalPerformance',
+                fields={
+                    'overall': inline_serializer(
+                        name='AdminWithdrawalPerformanceOverall',
+                        fields={
+                            'total_processed': drf_serializers.IntegerField(),
+                            'completed': drf_serializers.IntegerField(),
+                            'rejected': drf_serializers.IntegerField(),
+                            'failed': drf_serializers.IntegerField(),
+                            'success_rate_pct': drf_serializers.IntegerField(allow_null=True),
+                            'avg_processing_hours': drf_serializers.FloatField(allow_null=True, help_text='Average hours from creation to final status'),
+                        },
+                    ),
+                    'by_method': drf_serializers.DictField(
+                        help_text='Stats keyed by payment_method (Bank, MoMo)',
+                        child=inline_serializer(
+                            name='AdminWithdrawalMethodStats',
+                            fields={
+                                'count': drf_serializers.IntegerField(),
+                                'completed': drf_serializers.IntegerField(),
+                                'rejected': drf_serializers.IntegerField(),
+                                'failed': drf_serializers.IntegerField(),
+                                'success_rate_pct': drf_serializers.IntegerField(allow_null=True),
+                                'avg_processing_hours': drf_serializers.FloatField(allow_null=True),
+                            },
+                        ),
+                    ),
+                },
+            ),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        since, until = _parse_date_range(request, default_days=90)
+
+        qs = list(
+            WithdrawalRequest.objects
+            .filter(processed_at__isnull=False, created_at__gte=since, created_at__lte=until)
+            .only('status', 'payment_method', 'created_at', 'processed_at')
+        )
+
+        def _aggregate(records):
+            if not records:
+                return {
+                    'count': 0, 'completed': 0, 'rejected': 0, 'failed': 0,
+                    'success_rate_pct': None, 'avg_processing_hours': None,
+                }
+            completed = sum(1 for r in records if r.status == 'Completed')
+            rejected = sum(1 for r in records if r.status == 'Rejected')
+            failed = sum(1 for r in records if r.status == 'Failed')
+            total = len(records)
+            terminal = completed + rejected + failed
+            success_rate_pct = (completed * 100 // terminal) if terminal else None
+            deltas = [
+                (r.processed_at - r.created_at).total_seconds() / 3600
+                for r in records
+                if r.processed_at and r.created_at
+            ]
+            avg_hours = round(sum(deltas) / len(deltas), 1) if deltas else None
+            return {
+                'count': total,
+                'completed': completed,
+                'rejected': rejected,
+                'failed': failed,
+                'success_rate_pct': success_rate_pct,
+                'avg_processing_hours': avg_hours,
+            }
+
+        overall = _aggregate(qs)
+        overall['total_processed'] = overall.pop('count')
+
+        by_method = {}
+        for method in ('Bank', 'MoMo'):
+            subset = [r for r in qs if r.payment_method == method]
+            if subset:
+                by_method[method] = _aggregate(subset)
+
+        return Response({'overall': overall, 'by_method': by_method})
+
+
+# ─────────────────────────────────────────────
+# Payment Dispute: Lookup & Manual Resolution
+# ─────────────────────────────────────────────
+
+class AdminPaymentLookupView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Look up a payment by deposit ID or phone number',
+        description=(
+            'Finds a payment record using the PawaPay `deposit_id` from the viewer\'s MoMo receipt, '
+            'or by the `phone_number` used during payment. '
+            'Use this when a viewer claims they paid but their access is not granted. '
+            'At least one of `deposit_id` or `phone_number` must be provided.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                name='deposit_id',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='PawaPay deposit ID from the viewer\'s MoMo receipt',
+            ),
+            OpenApiParameter(
+                name='phone_number',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Phone number used during payment (e.g. 250788123456)',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='PaymentLookupResponse',
+                fields={
+                    'results': inline_serializer(
+                        name='PaymentLookupItem',
+                        fields={
+                            'id': drf_serializers.IntegerField(),
+                            'viewer_id': drf_serializers.IntegerField(),
+                            'viewer_name': drf_serializers.CharField(),
+                            'viewer_email': drf_serializers.EmailField(allow_null=True),
+                            'viewer_phone': drf_serializers.CharField(allow_null=True),
+                            'movie_id': drf_serializers.IntegerField(allow_null=True),
+                            'movie_title': drf_serializers.CharField(),
+                            'amount': drf_serializers.IntegerField(help_text='RWF'),
+                            'status': drf_serializers.CharField(help_text='Pending | Completed | Failed'),
+                            'deposit_id': drf_serializers.CharField(allow_null=True),
+                            'phone_number': drf_serializers.CharField(allow_null=True, help_text='Phone used for payment'),
+                            'created_at': drf_serializers.DateTimeField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            400: OpenApiResponse(description='Neither deposit_id nor phone_number provided'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+        },
+    )
+    def get(self, request):
+        deposit_id = request.GET.get('deposit_id', '').strip()
+        phone_number = request.GET.get('phone_number', '').strip()
+
+        if not deposit_id and not phone_number:
+            return Response(
+                {'error': 'Provide at least one of deposit_id or phone_number.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        qs = Payment.objects.select_related('user', 'movie')
+        if deposit_id:
+            qs = qs.filter(deposit_id=deposit_id)
+        elif phone_number:
+            qs = qs.filter(phone_number__icontains=phone_number)
+
+        results = [
+            {
+                'id': p.id,
+                'viewer_id': p.user_id,
+                'viewer_name': p.user.full_name if p.user else '',
+                'viewer_email': p.user.email if p.user else None,
+                'viewer_phone': p.user.phone_number if p.user else None,
+                'movie_id': p.movie_id,
+                'movie_title': p.movie.title if p.movie else 'Unknown',
+                'amount': p.amount,
+                'status': p.status,
+                'deposit_id': p.deposit_id,
+                'phone_number': p.phone_number,
+                'created_at': p.created_at,
+            }
+            for p in qs.order_by('-created_at')
+        ]
+
+        return Response({'results': results})
+
+
+class AdminPaymentResolveView(AdminBaseView):
+    @extend_schema(
+        tags=[_TAG],
+        summary='Manually resolve a disputed payment',
+        description=(
+            'Marks a `Pending` or `Failed` payment as `Completed`, immediately granting the viewer '
+            'access to the movie. Use this when a viewer provides proof of payment (MoMo receipt, '
+            'PawaPay transaction ID) and the system failed to update the status automatically. '
+            'A `reason` is required and the action is recorded in the audit log.'
+        ),
+        request=inline_serializer(
+            name='PaymentResolveRequest',
+            fields={
+                'reason': drf_serializers.CharField(
+                    help_text='Why this payment is being manually resolved (e.g. "Viewer provided MoMo receipt ref TX123, webhook missed")'
+                ),
+            },
+        ),
+        responses={
+            200: inline_serializer(
+                name='PaymentResolveResponse',
+                fields={
+                    'message': drf_serializers.CharField(),
+                    'payment_id': drf_serializers.IntegerField(),
+                    'viewer': drf_serializers.CharField(),
+                    'movie': drf_serializers.CharField(),
+                    'status': drf_serializers.CharField(help_text='Always "Completed" after resolution'),
+                },
+            ),
+            400: OpenApiResponse(description='Payment is already Completed, or reason not provided'),
+            401: OpenApiResponse(description='Authentication credentials not provided'),
+            403: OpenApiResponse(description='Admin role required'),
+            404: OpenApiResponse(description='Payment not found'),
+        },
+    )
+    def post(self, request, payment_id):
+        payment = get_object_or_404(Payment, id=payment_id)
+
+        if payment.status == 'Completed':
+            return Response(
+                {'error': 'Payment is already Completed — viewer already has access.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response(
+                {'error': 'A reason is required to manually resolve a payment.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previous_status = payment.status
+        payment.status = 'Completed'
+        payment.save(update_fields=['status'])
+
+        _log_admin_action(
+            request,
+            'resolve_payment',
+            target_user=payment.user,
+            detail={
+                'payment_id': payment.id,
+                'previous_status': previous_status,
+                'deposit_id': payment.deposit_id,
+                'movie': payment.movie.title if payment.movie else None,
+                'viewer_email': payment.user.email if payment.user else None,
+                'amount_rwf': payment.amount,
+                'reason': reason,
+            },
+        )
+
+        return Response({
+            'message': 'Payment resolved. Viewer now has access to the movie.',
+            'payment_id': payment.id,
+            'viewer': payment.user.full_name or payment.user.email or str(payment.user_id),
+            'movie': payment.movie.title if payment.movie else 'Unknown',
+            'status': payment.status,
+        })

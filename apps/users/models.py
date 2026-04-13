@@ -81,6 +81,7 @@ class AdminAuditLog(models.Model):
         ('reject_withdrawal',    'Reject Withdrawal'),
         ('reset_user_password',  'Reset User Password'),
         ('view_viewer_pii',      'View Viewer PII (dispute/support)'),
+        ('resolve_payment',      'Manually Resolve Payment'),
     ]
 
     admin               = models.ForeignKey(
