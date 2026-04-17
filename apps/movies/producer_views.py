@@ -153,7 +153,7 @@ class ProducerWalletView(ProducerBaseView):
                 name='ProducerWallet',
                 fields={
                     'gross_revenue': drf_serializers.IntegerField(help_text='Total completed payment revenue from your movies (RWF)'),
-                    'ikigembe_commission': drf_serializers.IntegerField(help_text='30% platform commission deducted from gross revenue (RWF)'),
+                    'platform_commission': drf_serializers.IntegerField(help_text='30% platform commission deducted from gross revenue (RWF)'),
                     'total_earnings': drf_serializers.IntegerField(help_text='Your 70% share of gross revenue (RWF)'),
                     'wallet_balance': drf_serializers.IntegerField(help_text='Available balance — total_earnings minus locked/paid amounts (RWF)'),
                     'pending_withdrawals': drf_serializers.IntegerField(help_text='Amount locked in pending withdrawal requests (RWF)'),

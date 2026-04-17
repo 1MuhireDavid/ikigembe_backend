@@ -6,7 +6,7 @@ from apps.payments.models import Payment, WithdrawalRequest
 
 
 def producer_split(gross: int) -> tuple:
-    """Return (producer_earnings, ikigembe_commission) for a gross amount.
+    """Return (producer_earnings, platform_commission) for a gross amount.
 
     Producer share is computed first as (gross * 70) // 100; commission is
     the remainder.  This guarantees producer_earnings + commission == gross
@@ -30,7 +30,7 @@ def get_producer_wallet(producer):
         status='Completed',
     ).aggregate(total=Coalesce(Sum('amount'), 0))['total']
 
-    total_earnings, ikigembe_commission = producer_split(raw_revenue)
+    total_earnings, platform_commission = producer_split(raw_revenue)
 
     locked = WithdrawalRequest.objects.filter(
         producer=producer,
@@ -49,7 +49,7 @@ def get_producer_wallet(producer):
 
     return {
         'gross_revenue': raw_revenue,
-        'ikigembe_commission': ikigembe_commission,
+        'platform_commission': platform_commission,
         'total_earnings': total_earnings,
         'wallet_balance': total_earnings - locked,
         'pending_withdrawals': pending,

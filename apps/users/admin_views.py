@@ -28,7 +28,7 @@ from requests import RequestException as RequestsRequestException
 
 from apps.users.permissions import IsAdminRole
 from apps.users.serializers import AdminCreateProducerSerializer
-from apps.movies.models import Movie, Subtitle
+from apps.movies.models import Movie, Subtitle, WatchProgress
 from apps.movies.serializers import SubtitleSerializer, SubtitleUploadSerializer, SubtitleUpdateSerializer
 from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet, producer_split
@@ -145,7 +145,7 @@ class AdminDashboardOverviewView(AdminBaseView):
                         fields={
                             'total_revenue': drf_serializers.IntegerField(help_text='All-time completed payment revenue (RWF)'),
                             'producer_revenue': drf_serializers.IntegerField(help_text='70% share owed to producers (RWF)'),
-                            'ikigembe_commission': drf_serializers.IntegerField(help_text='30% platform commission (RWF)'),
+                            'platform_commission': drf_serializers.IntegerField(help_text='30% platform commission (RWF)'),
                             'revenue_today': drf_serializers.IntegerField(help_text='Revenue from today (RWF)'),
                             'revenue_this_month': drf_serializers.IntegerField(help_text='Revenue from current calendar month (RWF)'),
                             'total_paid_to_producers': drf_serializers.IntegerField(help_text='Sum of Approved + Completed withdrawal requests (RWF)'),
@@ -171,7 +171,7 @@ class AdminDashboardOverviewView(AdminBaseView):
 
         total_revenue = Payment.objects.filter(status='Completed').aggregate(total=Sum('amount'))['total'] or 0
         producer_revenue = (total_revenue * 70) // 100
-        ikigembe_commission = total_revenue - producer_revenue
+        platform_commission = total_revenue - producer_revenue
 
         revenue_today = Payment.objects.filter(status='Completed', created_at__gte=today_start).aggregate(total=Sum('amount'))['total'] or 0
         revenue_this_month = Payment.objects.filter(status='Completed', created_at__gte=month_start).aggregate(total=Sum('amount'))['total'] or 0
@@ -187,7 +187,7 @@ class AdminDashboardOverviewView(AdminBaseView):
             'financials': {
                 'total_revenue': total_revenue,
                 'producer_revenue': producer_revenue,
-                'ikigembe_commission': ikigembe_commission,
+                'platform_commission': platform_commission,
                 'revenue_today': revenue_today,
                 'revenue_this_month': revenue_this_month,
                 'total_paid_to_producers': total_paid_to_producers,
@@ -1643,60 +1643,128 @@ class AdminTopMoviesView(AdminBaseView):
         limit = min(_safe_int(request, 'limit', 10), 50)
         since, until = _parse_date_range(request, default_days=365)
 
-        date_filter = Q(
-            payments__status='Completed',
-            payments__created_at__gte=since,
-            payments__created_at__lte=until,
-        )
-        movies = Movie.objects.select_related('producer_profile').annotate(
-            total_revenue=Coalesce(Sum('payments__amount', filter=date_filter), 0),
-            purchase_count=Count('payments', filter=date_filter),
-            unique_viewers=Count('watch_progress__user', distinct=True),
-            avg_watch_seconds=Avg('watch_progress__progress_seconds'),
-            total_watches=Count('watch_progress'),
-            completed_watches=Count('watch_progress', filter=Q(watch_progress__completed=True)),
-        )
+        completed_filter = Q(status='Completed', created_at__gte=since, created_at__lte=until)
 
-        # Annotate the completion rate fraction so we can ORDER BY the same value
-        # returned in the response, not the raw completed_watches count.
-        # NullIf guards division by zero; nulls sort last (movies with no watchers).
-        movies = movies.annotate(
-            completion_rate_value=ExpressionWrapper(
-                F('completed_watches') * 1.0 / NullIf(F('total_watches'), Value(0)),
-                output_field=FloatField(),
+        # ── Step 1: Determine the top-N movie_ids using a single-model query
+        # for each sort key so there is no cross-join between payments and
+        # watch_progress that would inflate counts and sums.
+        if sort == 'views':
+            ordered_ids = list(
+                Movie.objects
+                .order_by(F('views').desc(nulls_last=True))
+                .values_list('id', flat=True)[:limit]
             )
-        )
-
-        sort_map = {
-            'views': F('views').desc(nulls_last=True),
-            'unique_viewers': F('unique_viewers').desc(nulls_last=True),
-            'completion_rate': F('completion_rate_value').desc(nulls_last=True),
-        }
-        movies = movies.order_by(sort_map.get(sort, F('total_revenue').desc(nulls_last=True)))
-        if sort not in sort_map and sort != 'revenue':
+        elif sort == 'unique_viewers':
+            ordered_ids = [
+                row['movie_id']
+                for row in (
+                    WatchProgress.objects
+                    .values('movie_id')
+                    .annotate(unique_viewers=Count('user', distinct=True))
+                    .order_by(F('unique_viewers').desc(nulls_last=True))[:limit]
+                )
+            ]
+        elif sort == 'completion_rate':
+            ordered_ids = [
+                row['movie_id']
+                for row in (
+                    WatchProgress.objects
+                    .values('movie_id')
+                    .annotate(
+                        total_watches=Count('id'),
+                        completed_watches=Count('id', filter=Q(completed=True)),
+                    )
+                    .annotate(
+                        completion_rate_value=ExpressionWrapper(
+                            F('completed_watches') * 1.0 / NullIf(F('total_watches'), Value(0)),
+                            output_field=FloatField(),
+                        )
+                    )
+                    .order_by(F('completion_rate_value').desc(nulls_last=True))[:limit]
+                )
+            ]
+        else:
             sort = 'revenue'
+            ordered_ids = [
+                row['movie_id']
+                for row in (
+                    Payment.objects
+                    .filter(completed_filter)
+                    .values('movie_id')
+                    .annotate(total_revenue=Sum('amount'))
+                    .order_by(F('total_revenue').desc(nulls_last=True))[:limit]
+                )
+            ]
 
+        if not ordered_ids:
+            return Response({'sort': sort, 'results': []})
+
+        # ── Step 2: Payment aggregates — one query, no watch_progress join ────
+        payment_agg = {
+            row['movie_id']: row
+            for row in (
+                Payment.objects
+                .filter(movie_id__in=ordered_ids)
+                .values('movie_id')
+                .annotate(
+                    total_revenue=Coalesce(Sum('amount', filter=completed_filter), 0),
+                    purchase_count=Count('id', filter=completed_filter),
+                )
+            )
+        }
+
+        # ── Step 3: Watch-progress aggregates — one query, no payments join ───
+        watch_agg = {
+            row['movie_id']: row
+            for row in (
+                WatchProgress.objects
+                .filter(movie_id__in=ordered_ids)
+                .values('movie_id')
+                .annotate(
+                    unique_viewers=Count('user', distinct=True),
+                    avg_watch_seconds=Avg('progress_seconds'),
+                    total_watches=Count('id'),
+                    completed_watches=Count('id', filter=Q(completed=True)),
+                )
+            )
+        }
+
+        # ── Step 4: Movie objects (metadata only — no aggregated joins) ────────
+        movie_map = {
+            m.id: m
+            for m in Movie.objects.filter(id__in=ordered_ids).select_related('producer_profile')
+        }
+
+        # ── Step 5: Assemble results preserving the sort order from Step 1 ────
         results = []
-        for movie in movies[:limit]:
-            total_watches = movie.total_watches or 0
-            completed_watches = movie.completed_watches or 0
+        for movie_id in ordered_ids:
+            movie = movie_map.get(movie_id)
+            if not movie:
+                continue
+            p = payment_agg.get(movie_id, {})
+            w = watch_agg.get(movie_id, {})
+
+            total_watches = w.get('total_watches') or 0
+            completed_watches = w.get('completed_watches') or 0
             completion_rate = round(completed_watches / total_watches, 4) if total_watches > 0 else 0.0
-            avg_watch_seconds = movie.avg_watch_seconds or 0
+            avg_watch_seconds = w.get('avg_watch_seconds') or 0
             views = movie.views or 0
-            producer_share, platform_commission = producer_split(movie.total_revenue)
+            total_revenue = p.get('total_revenue') or 0
+            producer_share, platform_commission = producer_split(total_revenue)
+
             results.append({
                 'id': movie.id,
                 'title': movie.title,
                 'producer': movie.producer_profile.full_name if movie.producer_profile else 'Unknown',
                 'views': views,
-                'unique_viewers': movie.unique_viewers,
+                'unique_viewers': w.get('unique_viewers') or 0,
                 'avg_watch_time_minutes': round(avg_watch_seconds / 60, 2),
                 'completion_rate': completion_rate,
-                'purchase_count': movie.purchase_count,
-                'total_revenue': movie.total_revenue,
+                'purchase_count': p.get('purchase_count') or 0,
+                'total_revenue': total_revenue,
                 'producer_share': producer_share,
                 'platform_commission': platform_commission,
-                'revenue_per_view': round(movie.total_revenue / views, 2) if views > 0 else 0.0,
+                'revenue_per_view': round(total_revenue / views, 2) if views > 0 else 0.0,
             })
 
         if request.GET.get('export') == 'csv':
@@ -2229,7 +2297,7 @@ class AdminGenreRevenueView(AdminBaseView):
                             'genre': drf_serializers.CharField(),
                             'total_revenue': drf_serializers.IntegerField(help_text='Sum of completed payments for movies in this genre (RWF)'),
                             'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
-                            'ikigembe_commission': drf_serializers.IntegerField(help_text='30% of total_revenue (RWF)'),
+                            'platform_commission': drf_serializers.IntegerField(help_text='30% of total_revenue (RWF)'),
                             'purchase_count': drf_serializers.IntegerField(help_text='Number of completed purchases'),
                             'movie_count': drf_serializers.IntegerField(help_text='Number of distinct movies in this genre that had sales'),
                         },
@@ -2286,7 +2354,7 @@ class AdminGenreRevenueView(AdminBaseView):
                 'genre': genre,
                 'total_revenue': stats['revenue'],
                 'producer_share': producer_share,
-                'ikigembe_commission': commission,
+                'platform_commission': commission,
                 'purchase_count': stats['count'],
                 'movie_count': len(stats['movie_ids']),
             })
