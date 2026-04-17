@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from apps.payments.models import Payment
-from .models import Movie, WatchProgress
+from .models import Movie, WatchProgress, Subtitle, LANGUAGE_CHOICES
 
 
 class MovieSerializer(serializers.ModelSerializer):
@@ -10,7 +10,7 @@ class MovieSerializer(serializers.ModelSerializer):
     backdrop_url = serializers.SerializerMethodField()
     trailer_url = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
-    subtitles_url = serializers.SerializerMethodField()
+    subtitles = serializers.SerializerMethodField()
     producer_profile = serializers.SerializerMethodField()
     has_purchased = serializers.SerializerMethodField()
 
@@ -24,7 +24,7 @@ class MovieSerializer(serializers.ModelSerializer):
             'backdrop_url',
             'trailer_url',
             'video_url',
-            'subtitles_url',
+            'subtitles',
             'price',
             'rating',
             'release_date',
@@ -52,9 +52,18 @@ class MovieSerializer(serializers.ModelSerializer):
         """Returns the full video URL — for testing frontend playback."""
         return obj.video_file.url if obj.video_file else None
 
-    def get_subtitles_url(self, obj):
-        """Returns the URL for the subtitles file."""
-        return obj.subtitles_file.url if obj.subtitles_file else None
+    def get_subtitles(self, obj):
+        """Returns all subtitle tracks ordered by display order then language code."""
+        return [
+            {
+                'id': s.id,
+                'language_code': s.language_code,
+                'language_name': s.language_name,
+                'url': s.subtitle_file.url if s.subtitle_file else None,
+                'is_default': s.is_default,
+            }
+            for s in obj.subtitles.all().order_by('ordering', 'language_code')
+        ]
 
     def get_producer_profile(self, obj):
         """Returns basic info about the linked producer user account."""
@@ -83,7 +92,7 @@ class MovieDetailSerializer(serializers.ModelSerializer):
     backdrop_url = serializers.SerializerMethodField()
     trailer_url = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
-    subtitles_url = serializers.SerializerMethodField()
+    subtitles = serializers.SerializerMethodField()
     producer_profile = serializers.SerializerMethodField()
     has_purchased = serializers.SerializerMethodField()
 
@@ -98,7 +107,7 @@ class MovieDetailSerializer(serializers.ModelSerializer):
             'trailer_url',
             'trailer_duration_seconds',
             'video_url',
-            'subtitles_url',
+            'subtitles',
             'price',
             'views',
             'rating',
@@ -126,8 +135,17 @@ class MovieDetailSerializer(serializers.ModelSerializer):
     def get_video_url(self, obj):
         return obj.video_file.url if obj.video_file else None
 
-    def get_subtitles_url(self, obj):
-        return obj.subtitles_file.url if obj.subtitles_file else None
+    def get_subtitles(self, obj):
+        return [
+            {
+                'id': s.id,
+                'language_code': s.language_code,
+                'language_name': s.language_name,
+                'url': s.subtitle_file.url if s.subtitle_file else None,
+                'is_default': s.is_default,
+            }
+            for s in obj.subtitles.all().order_by('ordering', 'language_code')
+        ]
 
     def get_producer_profile(self, obj):
         user = obj.producer_profile
@@ -182,6 +200,7 @@ class ProducerMovieDetailSerializer(serializers.ModelSerializer):
     trailer_url = serializers.SerializerMethodField()
     video_url = serializers.SerializerMethodField()
     hls_url = serializers.SerializerMethodField()
+    subtitles = serializers.SerializerMethodField()
 
     class Meta:
         model = Movie
@@ -196,6 +215,7 @@ class ProducerMovieDetailSerializer(serializers.ModelSerializer):
             'video_url',
             'hls_url',
             'hls_status',
+            'subtitles',
             'price',
             'views',
             'rating',
@@ -225,13 +245,25 @@ class ProducerMovieDetailSerializer(serializers.ModelSerializer):
     def get_hls_url(self, obj):
         return obj.hls_url
 
+    def get_subtitles(self, obj):
+        return [
+            {
+                'id': s.id,
+                'language_code': s.language_code,
+                'language_name': s.language_name,
+                'url': s.subtitle_file.url if s.subtitle_file else None,
+                'is_default': s.is_default,
+            }
+            for s in obj.subtitles.all().order_by('ordering', 'language_code')
+        ]
+
 
 class MovieVideoAccessSerializer(serializers.ModelSerializer):
     """Full video access serializer"""
 
     video_url = serializers.SerializerMethodField()
     trailer_url = serializers.SerializerMethodField()
-    subtitles_url = serializers.SerializerMethodField()
+    subtitles = serializers.SerializerMethodField()
     access_granted = serializers.SerializerMethodField()
     hls_url = serializers.SerializerMethodField()
 
@@ -242,7 +274,7 @@ class MovieVideoAccessSerializer(serializers.ModelSerializer):
             'title',
             'video_url',
             'trailer_url',
-            'subtitles_url',
+            'subtitles',
             'duration_minutes',
             'access_granted',
             'hls_status',
@@ -258,8 +290,17 @@ class MovieVideoAccessSerializer(serializers.ModelSerializer):
     def get_trailer_url(self, obj):
         return obj.trailer_file.url if obj.trailer_file else None
 
-    def get_subtitles_url(self, obj):
-        return obj.subtitles_file.url if obj.subtitles_file else None
+    def get_subtitles(self, obj):
+        return [
+            {
+                'id': s.id,
+                'language_code': s.language_code,
+                'language_name': s.language_name,
+                'url': s.subtitle_file.url if s.subtitle_file else None,
+                'is_default': s.is_default,
+            }
+            for s in obj.subtitles.all().order_by('ordering', 'language_code')
+        ]
 
     def get_access_granted(self, obj):
         """Return True if the requesting user has a completed payment for this movie."""
@@ -286,7 +327,6 @@ class MovieCreateSerializer(serializers.ModelSerializer):
             'backdrop',
             'video_file',
             'trailer_file',
-            'subtitles_file',
             'price',
             'release_date',
             'duration_minutes',
@@ -360,3 +400,52 @@ class MyListMovieSerializer(serializers.ModelSerializer):
     def get_last_watched_at(self, obj):
         p = self._progress(obj)
         return p.last_watched_at if p else None
+
+
+class SubtitleSerializer(serializers.ModelSerializer):
+    """Read-only serializer for a single subtitle track (used in GET responses)."""
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Subtitle
+        fields = ['id', 'language_code', 'language_name', 'url', 'is_default', 'ordering']
+        read_only_fields = ['id', 'language_name', 'url']
+
+    def get_url(self, obj):
+        return obj.subtitle_file.url if obj.subtitle_file else None
+
+
+class SubtitleUploadSerializer(serializers.ModelSerializer):
+    """Write serializer for uploading a new subtitle track (POST /subtitles/)."""
+
+    class Meta:
+        model = Subtitle
+        fields = ['language_code', 'subtitle_file', 'is_default', 'ordering']
+
+    def validate_language_code(self, value):
+        if value not in dict(LANGUAGE_CHOICES):
+            valid = sorted(dict(LANGUAGE_CHOICES).keys())
+            raise serializers.ValidationError(
+                f'"{value}" is not a supported language code. Accepted values: {valid}'
+            )
+        return value
+
+
+class SubtitleUpdateSerializer(serializers.ModelSerializer):
+    """Partial-update serializer for PATCH /subtitles/<id>/."""
+
+    class Meta:
+        model = Subtitle
+        fields = ['language_code', 'language_name', 'is_default', 'ordering']
+        extra_kwargs = {
+            'language_code': {'required': False},
+            'language_name': {'required': False},
+        }
+
+    def validate_language_code(self, value):
+        if value not in dict(LANGUAGE_CHOICES):
+            valid = sorted(dict(LANGUAGE_CHOICES).keys())
+            raise serializers.ValidationError(
+                f'"{value}" is not a supported language code. Accepted values: {valid}'
+            )
+        return value

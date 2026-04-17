@@ -16,6 +16,8 @@ from .views import (
     MovieCreateView,
     MovieUpdateView,
     MovieDeleteView,
+    SubtitleListView,
+    SubtitleDetailView,
     InitiateMultipartUploadView,
     SignMultipartUploadPartView,
     CompleteMultipartUploadView,
@@ -58,6 +60,8 @@ urlpatterns = [
     path('<int:id>/transcode/', MovieTranscodeView.as_view(), name='movie-transcode'),
     path('<int:id>/hls-status/', MovieHlsStatusView.as_view(), name='movie-hls-status'),
     path('<int:id>/progress/', WatchProgressView.as_view(), name='movie-progress'),
+    path('<int:id>/subtitles/', SubtitleListView.as_view(), name='movie-subtitles'),
+    path('<int:id>/subtitles/<int:subtitle_id>/', SubtitleDetailView.as_view(), name='movie-subtitle-detail'),
 
     # ── S3 Multipart Upload (admin) ────────────────────────────────────
     path('upload/initiate/', InitiateMultipartUploadView.as_view(), name='upload-initiate'),
