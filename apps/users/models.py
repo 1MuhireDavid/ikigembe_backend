@@ -132,3 +132,19 @@ class PasswordResetToken(models.Model):
 
     def __str__(self):
         return f'reset token for {self.user} (used={self.used})'
+
+
+class FailedLoginAttempt(models.Model):
+    """One row per failed login attempt. Used for brute-force detection."""
+    ip_address = models.GenericIPAddressField(db_index=True)
+    identifier = models.CharField(max_length=255, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['ip_address', 'identifier', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f'failed login from {self.ip_address} for "{self.identifier}"'

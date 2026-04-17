@@ -133,7 +133,17 @@ class MovieDetailSerializer(serializers.ModelSerializer):
         return obj.trailer_file.url if obj.trailer_file else None
 
     def get_video_url(self, obj):
-        return obj.video_file.url if obj.video_file else None
+        if not obj.video_file:
+            return None
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            return None
+        user = request.user
+        if user.role == 'Admin' or (user.role == 'Producer' and obj.producer_profile_id == user.id):
+            return obj.video_file.url
+        if Payment.objects.filter(user=user, movie=obj, status='Completed').exists():
+            return obj.video_file.url
+        return None
 
     def get_subtitles(self, obj):
         return [
