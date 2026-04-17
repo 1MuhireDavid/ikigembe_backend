@@ -240,36 +240,50 @@ class ProducerReportView(ProducerBaseView):
     )
     def get(self, request):
         since, until = _parse_date_range(request)
-        payment_date_filter = Q(
-            payments__status='Completed',
-            payments__created_at__gte=since,
-            payments__created_at__lte=until,
-        )
 
         wallet = get_producer_wallet(request.user)
-        movies = (
+        movies = list(
             Movie.objects
             .filter(producer_profile=request.user)
-            .annotate(
-                total_revenue=Coalesce(Sum('payments__amount', filter=payment_date_filter), 0),
-                purchase_count=Count('payments', filter=payment_date_filter),
-                pending_count=Count('payments', filter=Q(payments__status='Pending')),
-                failed_count=Count('payments', filter=Q(payments__status='Failed')),
-                total_watch_seconds=Coalesce(Sum('watch_progress__progress_seconds'), 0),
-                avg_watch_seconds=Avg('watch_progress__progress_seconds'),
-                total_watches=Count('watch_progress'),
-                completed_watches=Count('watch_progress', filter=Q(watch_progress__completed=True)),
-            )
             .order_by('-created_at')
         )
+        movie_ids = [m.id for m in movies]
+
+        # Aggregate payments separately to avoid cross-join inflation with WatchProgress.
+        # Grouping by movie_id on a pre-filtered qs produces one row per movie.
+        payment_agg = {
+            row['movie_id']: row
+            for row in Payment.objects.filter(movie_id__in=movie_ids).values('movie_id').annotate(
+                total_revenue=Coalesce(
+                    Sum('amount', filter=Q(status='Completed', created_at__gte=since, created_at__lte=until)), 0
+                ),
+                purchase_count=Count('id', filter=Q(status='Completed', created_at__gte=since, created_at__lte=until)),
+                pending_count=Count('id', filter=Q(status='Pending')),
+                failed_count=Count('id', filter=Q(status='Failed')),
+            )
+        }
+
+        # Aggregate WatchProgress separately for the same reason.
+        watch_agg = {
+            row['movie_id']: row
+            for row in WatchProgress.objects.filter(movie_id__in=movie_ids).values('movie_id').annotate(
+                total_watch_seconds=Coalesce(Sum('progress_seconds'), 0),
+                avg_watch_seconds=Avg('progress_seconds'),
+                total_watches=Count('id'),
+                completed_watches=Count('id', filter=Q(completed=True)),
+            )
+        }
 
         movies_data = []
         for movie in movies:
-            total_watches = movie.total_watches or 0
-            completed_watches = movie.completed_watches or 0
+            p = payment_agg.get(movie.id, {})
+            w = watch_agg.get(movie.id, {})
+            total_watches = w.get('total_watches') or 0
+            completed_watches = w.get('completed_watches') or 0
             completion_rate = round(completed_watches / total_watches, 4) if total_watches > 0 else 0.0
-            avg_watch_seconds = movie.avg_watch_seconds or 0
-            net_earnings, platform_commission = producer_split(movie.total_revenue)
+            avg_watch_seconds = w.get('avg_watch_seconds') or 0
+            total_revenue = p.get('total_revenue') or 0
+            net_earnings, platform_commission = producer_split(total_revenue)
             movies_data.append({
                 'id': movie.id,
                 'title': movie.title,
@@ -277,16 +291,16 @@ class ProducerReportView(ProducerBaseView):
                 'upload_date': movie.created_at,
                 'release_date': movie.release_date,
                 'views': movie.views,
-                'total_watch_time_minutes': round(movie.total_watch_seconds / 60, 2),
+                'total_watch_time_minutes': round((w.get('total_watch_seconds') or 0) / 60, 2),
                 'avg_watch_duration_minutes': round(avg_watch_seconds / 60, 2),
                 'completion_rate': completion_rate,
-                'total_revenue': movie.total_revenue,
+                'total_revenue': total_revenue,
                 'platform_commission': platform_commission,
                 'net_earnings': net_earnings,
-                'purchase_count': movie.purchase_count,
+                'purchase_count': p.get('purchase_count') or 0,
                 'payment_statuses': {
-                    'pending': movie.pending_count,
-                    'failed': movie.failed_count,
+                    'pending': p.get('pending_count') or 0,
+                    'failed': p.get('failed_count') or 0,
                 },
             })
 

@@ -18,8 +18,8 @@ from drf_spectacular.utils import (
 )
 from drf_spectacular.types import OpenApiTypes
 from django.db import IntegrityError, transaction
-from django.db.models import Sum, Count, Q, Max, Min
-from django.db.models.functions import Coalesce, TruncDay, TruncMonth, TruncWeek, TruncYear
+from django.db.models import Sum, Count, Avg, Q, Max, Min, ExpressionWrapper, FloatField, F, Value
+from django.db.models.functions import Coalesce, TruncDay, TruncMonth, TruncWeek, TruncYear, NullIf
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -1454,11 +1454,10 @@ class AdminRevenueTrendView(AdminBaseView):
                     'summary': inline_serializer(
                         name='AdminRevenueTrendSummary',
                         fields={
-                            'total_revenue': drf_serializers.IntegerField(help_text='Gross completed revenue in range (RWF)'),
-                            'total_refunds': drf_serializers.IntegerField(help_text='Sum of failed payment amounts (RWF)'),
-                            'net_revenue': drf_serializers.IntegerField(help_text='total_revenue − total_refunds (RWF)'),
-                            'producer_share': drf_serializers.IntegerField(help_text='70% of net_revenue (RWF)'),
-                            'platform_commission': drf_serializers.IntegerField(help_text='30% of net_revenue (RWF)'),
+                            'total_revenue': drf_serializers.IntegerField(help_text='Sum of Completed payments in range (RWF)'),
+                            'failed_attempts': drf_serializers.IntegerField(help_text='Count of Failed payment attempts (informational — never collected)'),
+                            'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
+                            'platform_commission': drf_serializers.IntegerField(help_text='30% of total_revenue (RWF)'),
                             'purchase_count': drf_serializers.IntegerField(),
                         },
                     ),
@@ -1466,11 +1465,10 @@ class AdminRevenueTrendView(AdminBaseView):
                         name='AdminRevenueTrendItem',
                         fields={
                             'period_start': drf_serializers.DateTimeField(),
-                            'total_revenue': drf_serializers.IntegerField(help_text='RWF'),
-                            'refunds': drf_serializers.IntegerField(help_text='Failed payment amounts this period (RWF)'),
-                            'net_revenue': drf_serializers.IntegerField(help_text='total_revenue − refunds (RWF)'),
-                            'producer_share': drf_serializers.IntegerField(help_text='70% of net_revenue (RWF)'),
-                            'platform_commission': drf_serializers.IntegerField(help_text='30% of net_revenue (RWF)'),
+                            'total_revenue': drf_serializers.IntegerField(help_text='Sum of Completed payments (RWF)'),
+                            'failed_attempts': drf_serializers.IntegerField(help_text='Count of Failed payment attempts this period (never collected)'),
+                            'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
+                            'platform_commission': drf_serializers.IntegerField(help_text='30% of total_revenue (RWF)'),
                             'purchase_count': drf_serializers.IntegerField(),
                         },
                         many=True,
@@ -1502,6 +1500,7 @@ class AdminRevenueTrendView(AdminBaseView):
 
         since, until = _parse_date_range(request, default_days)
 
+        # Completed payments — the actual collected revenue
         completed_rows = (
             Payment.objects
             .filter(status='Completed', created_at__gte=since, created_at__lte=until)
@@ -1511,47 +1510,44 @@ class AdminRevenueTrendView(AdminBaseView):
             .order_by('period_start')
         )
 
-        refund_map = {
-            row['period_start']: row['refunds'] or 0
+        # Failed payment attempt counts per period — informational only.
+        # Failed payments were never collected so they are NOT deducted from revenue.
+        failed_map = {
+            row['period_start']: row['failed_attempts']
             for row in (
                 Payment.objects
                 .filter(status='Failed', created_at__gte=since, created_at__lte=until)
                 .annotate(period_start=trunc_fn('created_at'))
                 .values('period_start')
-                .annotate(refunds=Sum('amount'))
+                .annotate(failed_attempts=Count('id'))
             )
         }
 
         trend = []
         for row in completed_rows:
             rev = row['total_revenue'] or 0
-            refunds = refund_map.get(row['period_start'], 0)
-            net = rev - refunds
-            producer_share, platform_commission = producer_split(net)
+            producer_share, platform_commission = producer_split(rev)
             trend.append({
                 'period_start': row['period_start'],
                 'total_revenue': rev,
-                'refunds': refunds,
-                'net_revenue': net,
+                'failed_attempts': failed_map.get(row['period_start'], 0),
                 'producer_share': producer_share,
                 'platform_commission': platform_commission,
                 'purchase_count': row['purchase_count'],
             })
 
         total_revenue = sum(r['total_revenue'] for r in trend)
-        total_refunds = sum(r['refunds'] for r in trend)
-        net_revenue = total_revenue - total_refunds
-        summary_producer_share, summary_platform_commission = producer_split(net_revenue)
+        summary_producer_share, summary_platform_commission = producer_split(total_revenue)
 
         if request.GET.get('export') == 'csv':
             headers = [
-                'Period Start', 'Total Revenue (RWF)', 'Refunds (RWF)', 'Net Revenue (RWF)',
+                'Period Start', 'Total Revenue (RWF)', 'Failed Attempts',
                 'Producer Share (RWF)', 'Platform Commission (RWF)', 'Purchase Count',
             ]
             rows = [
                 [
                     r['period_start'].date() if r['period_start'] else '',
-                    r['total_revenue'], r['refunds'], r['net_revenue'],
+                    r['total_revenue'], r['failed_attempts'],
                     r['producer_share'], r['platform_commission'], r['purchase_count'],
                 ]
                 for r in trend
@@ -1562,8 +1558,7 @@ class AdminRevenueTrendView(AdminBaseView):
             'period': period,
             'summary': {
                 'total_revenue': total_revenue,
-                'total_refunds': total_refunds,
-                'net_revenue': net_revenue,
+                'failed_attempts': sum(r['failed_attempts'] for r in trend),
                 'producer_share': summary_producer_share,
                 'platform_commission': summary_platform_commission,
                 'purchase_count': sum(r['purchase_count'] for r in trend),
@@ -1662,12 +1657,22 @@ class AdminTopMoviesView(AdminBaseView):
             completed_watches=Count('watch_progress', filter=Q(watch_progress__completed=True)),
         )
 
+        # Annotate the completion rate fraction so we can ORDER BY the same value
+        # returned in the response, not the raw completed_watches count.
+        # NullIf guards division by zero; nulls sort last (movies with no watchers).
+        movies = movies.annotate(
+            completion_rate_value=ExpressionWrapper(
+                F('completed_watches') * 1.0 / NullIf(F('total_watches'), Value(0)),
+                output_field=FloatField(),
+            )
+        )
+
         sort_map = {
-            'views': '-views',
-            'unique_viewers': '-unique_viewers',
-            'completion_rate': '-completed_watches',
+            'views': F('views').desc(nulls_last=True),
+            'unique_viewers': F('unique_viewers').desc(nulls_last=True),
+            'completion_rate': F('completion_rate_value').desc(nulls_last=True),
         }
-        movies = movies.order_by(sort_map.get(sort, '-total_revenue'))
+        movies = movies.order_by(sort_map.get(sort, F('total_revenue').desc(nulls_last=True)))
         if sort not in sort_map and sort != 'revenue':
             sort = 'revenue'
 
