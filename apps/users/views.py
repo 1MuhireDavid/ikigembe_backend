@@ -1,3 +1,4 @@
+import ipaddress
 import uuid
 from datetime import timedelta
 
@@ -180,8 +181,13 @@ _LOCKOUT_WINDOW_MINUTES = 15
 def _get_client_ip(request):
     forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
     if forwarded_for:
-        return forwarded_for.split(',')[0].strip()
-    return request.META.get('REMOTE_ADDR', '0.0.0.0')
+        candidate = forwarded_for.split(',')[0].strip()
+        try:
+            ipaddress.ip_address(candidate)
+            return candidate
+        except ValueError:
+            pass
+    return request.META.get('REMOTE_ADDR', '127.0.0.1')
 
 
 def _is_locked_out(ip, identifier):
@@ -191,6 +197,16 @@ def _is_locked_out(ip, identifier):
         identifier__iexact=identifier,
         created_at__gte=window,
     ).count() >= _LOCKOUT_MAX_ATTEMPTS
+
+
+def _record_failed_attempt(ip, identifier):
+    cutoff = timezone.now() - timedelta(minutes=_LOCKOUT_WINDOW_MINUTES)
+    FailedLoginAttempt.objects.filter(
+        ip_address=ip,
+        identifier__iexact=identifier,
+        created_at__lt=cutoff,
+    ).delete()
+    FailedLoginAttempt.objects.create(ip_address=ip, identifier=identifier)
 
 
 class LoginView(APIView):
@@ -259,7 +275,7 @@ class LoginView(APIView):
         serializer = LoginSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
             if identifier:
-                FailedLoginAttempt.objects.create(ip_address=ip, identifier=identifier)
+                _record_failed_attempt(ip, identifier)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         user = serializer.validated_data['user']

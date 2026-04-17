@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from apps.payments.models import Payment
 from .models import Movie, WatchProgress, Subtitle, LANGUAGE_CHOICES
+from .cloudfront_signing import sign_hls_url
 
 
 class MovieSerializer(serializers.ModelSerializer):
@@ -49,8 +50,17 @@ class MovieSerializer(serializers.ModelSerializer):
         return obj.trailer_file.url if obj.trailer_file else None
 
     def get_video_url(self, obj):
-        """Returns the full video URL — for testing frontend playback."""
-        return obj.video_file.url if obj.video_file else None
+        if not obj.video_file:
+            return None
+        request = self.context.get('request')
+        if request is None or not request.user.is_authenticated:
+            return None
+        user = request.user
+        if user.role == 'Admin' or (user.role == 'Producer' and obj.producer_profile_id == user.id):
+            return sign_hls_url(obj.video_file.url)
+        if Payment.objects.filter(user=user, movie=obj, status='Completed').exists():
+            return sign_hls_url(obj.video_file.url)
+        return None
 
     def get_subtitles(self, obj):
         """Returns all subtitle tracks ordered by display order then language code."""
@@ -140,9 +150,9 @@ class MovieDetailSerializer(serializers.ModelSerializer):
             return None
         user = request.user
         if user.role == 'Admin' or (user.role == 'Producer' and obj.producer_profile_id == user.id):
-            return obj.video_file.url
+            return sign_hls_url(obj.video_file.url)
         if Payment.objects.filter(user=user, movie=obj, status='Completed').exists():
-            return obj.video_file.url
+            return sign_hls_url(obj.video_file.url)
         return None
 
     def get_subtitles(self, obj):
@@ -250,7 +260,7 @@ class ProducerMovieDetailSerializer(serializers.ModelSerializer):
         return obj.trailer_file.url if obj.trailer_file else None
 
     def get_video_url(self, obj):
-        return obj.video_file.url if obj.video_file else None
+        return sign_hls_url(obj.video_file.url) if obj.video_file else None
 
     def get_hls_url(self, obj):
         return obj.hls_url
@@ -295,7 +305,7 @@ class MovieVideoAccessSerializer(serializers.ModelSerializer):
         return obj.hls_url
 
     def get_video_url(self, obj):
-        return obj.video_file.url if obj.video_file else None
+        return sign_hls_url(obj.video_file.url) if obj.video_file else None
 
     def get_trailer_url(self, obj):
         return obj.trailer_file.url if obj.trailer_file else None

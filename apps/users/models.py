@@ -143,7 +143,7 @@ class FailedLoginAttempt(models.Model):
     class Meta:
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['ip_address', 'identifier', 'created_at']),
+            models.Index(fields=['ip_address', 'identifier', 'created_at'], name='users_faile_ip_addr_idx'),
         ]
 
     def __str__(self):

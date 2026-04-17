@@ -358,8 +358,16 @@ class MovieVideosView(APIView):
                 'is_free': True,
             })
         if movie.video_file:
+            user = request.user
+            has_access = (
+                user.is_authenticated and (
+                    user.role == 'Admin'
+                    or (user.role == 'Producer' and movie.producer_profile_id == user.id)
+                    or Payment.objects.filter(user=user, movie=movie, status='Completed').exists()
+                )
+            )
             videos.append({
-                'url': movie.video_url,
+                'url': sign_hls_url(movie.video_url) if has_access else None,
                 'name': f'{movie.title} - Full Movie',
                 'type': 'Full Movie',
                 'site': 'Local',
@@ -422,12 +430,12 @@ class MovieStreamView(APIView):
                 'stream_url': sign_hls_url(movie.hls_url),
                 'stream_type': 'hls',
                 'hls_status': movie.hls_status,
-                'fallback_url': movie.video_url,
+                'fallback_url': sign_hls_url(movie.video_url) if movie.video_url else None,
                 'subtitles': subtitles,
             })
         return Response({
             'movie': serializer.data,
-            'stream_url': movie.video_url,
+            'stream_url': sign_hls_url(movie.video_url) if movie.video_url else None,
             'stream_type': 'mp4',
             'hls_status': movie.hls_status,
             'fallback_url': None,
