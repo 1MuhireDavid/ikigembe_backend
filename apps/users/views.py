@@ -1,4 +1,5 @@
 import ipaddress
+import random
 import uuid
 from datetime import timedelta
 
@@ -200,12 +201,10 @@ def _is_locked_out(ip, identifier):
 
 
 def _record_failed_attempt(ip, identifier):
-    cutoff = timezone.now() - timedelta(minutes=_LOCKOUT_WINDOW_MINUTES)
-    FailedLoginAttempt.objects.filter(
-        ip_address=ip,
-        identifier__iexact=identifier,
-        created_at__lt=cutoff,
-    ).delete()
+    # Probabilistic global sweep (5% of calls) so rows from abandoned attack
+    # sessions are reaped without a dedicated background task.
+    if random.random() < 0.05:
+        FailedLoginAttempt.prune_expired(_LOCKOUT_WINDOW_MINUTES)
     FailedLoginAttempt.objects.create(ip_address=ip, identifier=identifier)
 
 
