@@ -125,7 +125,7 @@ class AdminDashboardTests(APITestCase):
         self.assertEqual(response.data['total_views'], 25)
         self.assertEqual(response.data['financials']['total_revenue'], 3000)
         self.assertEqual(response.data['financials']['producer_revenue'], 2100)
-        self.assertEqual(response.data['financials']['ikigembe_commission'], 900)
+        self.assertEqual(response.data['financials']['platform_commission'], 900)
 
     def test_viewers_list_endpoint(self):
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.admin_token}')
