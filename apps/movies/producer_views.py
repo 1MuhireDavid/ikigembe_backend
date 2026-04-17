@@ -1,6 +1,8 @@
+import csv
 from django.db import transaction
 from django.db.models import Sum, Count, Q, Avg, ExpressionWrapper, FloatField, F
 from django.db.models.functions import Coalesce, TruncDay, TruncMonth, TruncWeek
+from django.http import HttpResponse
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.views import APIView
@@ -17,12 +19,44 @@ from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import WithdrawalRequestSerializer, get_producer_wallet, producer_split
 
 
+def _csv_response(filename, headers, rows):
+    """Return a CSV file download response."""
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    writer = csv.writer(response)
+    writer.writerow(headers)
+    writer.writerows(rows)
+    return response
+
+
 def _safe_page(request):
     """Return a valid page number from ?page=, defaulting to 1 for any invalid input."""
     try:
         return max(1, int(request.GET.get('page', 1)))
     except (TypeError, ValueError):
         return 1
+
+
+def _parse_date_range(request, default_days=365):
+    """Parse ?start_date= and ?end_date= (YYYY-MM-DD). Defaults to last `default_days` days."""
+    from datetime import datetime
+    since = until = None
+    try:
+        since = timezone.make_aware(datetime.strptime(request.GET.get('start_date', ''), '%Y-%m-%d'))
+    except ValueError:
+        pass
+    try:
+        until = timezone.make_aware(
+            datetime.strptime(request.GET.get('end_date', ''), '%Y-%m-%d')
+            .replace(hour=23, minute=59, second=59, microsecond=999999)
+        )
+    except ValueError:
+        pass
+    if until is None:
+        until = timezone.now()
+    if since is None:
+        since = until - timedelta(days=default_days)
+    return since, until
 
 _TAG = 'Producer Dashboard'
 _REPORTS_TAG = 'Producer Reports'
@@ -139,14 +173,30 @@ class ProducerReportView(ProducerBaseView):
         tags=[_REPORTS_TAG],
         summary='My movies performance report',
         description=(
-            'Returns the authenticated producer\'s wallet summary alongside per-movie aggregate stats: '
-            'view count, purchase count, total revenue, and the producer\'s 70% share. '
-            'Use `GET /producer/movies/<id>/purchases/` to page through individual purchase records.'
+            'Returns the producer\'s wallet summary alongside per-movie content performance '
+            'and earnings data. Revenue stats are filterable by date range; watch engagement '
+            'metrics (watch time, completion rate) are lifetime totals. '
+            'Add ?export=csv to download the movies table as a CSV file.'
         ),
+        parameters=[
+            OpenApiParameter('start_date', OpenApiTypes.DATE, OpenApiParameter.QUERY,
+                             required=False, description='Filter revenue from this date (YYYY-MM-DD)'),
+            OpenApiParameter('end_date', OpenApiTypes.DATE, OpenApiParameter.QUERY,
+                             required=False, description='Filter revenue up to this date inclusive (YYYY-MM-DD)'),
+            OpenApiParameter('export', OpenApiTypes.STR, OpenApiParameter.QUERY,
+                             required=False, enum=['csv'], description='Set to "csv" to download as CSV'),
+        ],
         responses={
             200: inline_serializer(
                 name='ProducerReport',
                 fields={
+                    'date_range': inline_serializer(
+                        name='ProducerReportDateRange',
+                        fields={
+                            'start_date': drf_serializers.DateField(),
+                            'end_date': drf_serializers.DateField(),
+                        },
+                    ),
                     'wallet': inline_serializer(
                         name='ProducerReportWallet',
                         fields={
@@ -162,11 +212,23 @@ class ProducerReportView(ProducerBaseView):
                             'id': drf_serializers.IntegerField(),
                             'title': drf_serializers.CharField(),
                             'price': drf_serializers.IntegerField(),
-                            'views': drf_serializers.IntegerField(),
+                            'upload_date': drf_serializers.DateTimeField(help_text='When the movie was added to the platform'),
                             'release_date': drf_serializers.DateField(),
-                            'total_revenue': drf_serializers.IntegerField(help_text='Sum of completed payments (RWF)'),
-                            'purchase_count': drf_serializers.IntegerField(),
-                            'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
+                            'views': drf_serializers.IntegerField(),
+                            'total_watch_time_minutes': drf_serializers.FloatField(help_text='Lifetime sum of all viewer playback time in minutes'),
+                            'avg_watch_duration_minutes': drf_serializers.FloatField(help_text='Lifetime average playback time per viewer in minutes'),
+                            'completion_rate': drf_serializers.FloatField(help_text='Lifetime fraction of watchers who completed the movie (0–1)'),
+                            'total_revenue': drf_serializers.IntegerField(help_text='Gross revenue in date range (RWF)'),
+                            'platform_commission': drf_serializers.IntegerField(help_text='30% Ikigembe commission in date range (RWF)'),
+                            'net_earnings': drf_serializers.IntegerField(help_text='Your 70% share in date range (RWF)'),
+                            'purchase_count': drf_serializers.IntegerField(help_text='Completed purchases in date range'),
+                            'payment_statuses': inline_serializer(
+                                name='ProducerReportPaymentStatuses',
+                                fields={
+                                    'pending': drf_serializers.IntegerField(help_text='Payments not yet completed'),
+                                    'failed': drf_serializers.IntegerField(help_text='Payments that failed'),
+                                },
+                            ),
                         },
                         many=True,
                     ),
@@ -177,29 +239,87 @@ class ProducerReportView(ProducerBaseView):
         },
     )
     def get(self, request):
-        wallet = get_producer_wallet(request.user)
-        movies = Movie.objects.filter(producer_profile=request.user).annotate(
-            total_revenue=Coalesce(
-                Sum('payments__amount', filter=Q(payments__status='Completed')), 0
-            ),
-            purchase_count=Count('payments', filter=Q(payments__status='Completed')),
-        ).order_by('-created_at')
+        since, until = _parse_date_range(request)
+        payment_date_filter = Q(
+            payments__status='Completed',
+            payments__created_at__gte=since,
+            payments__created_at__lte=until,
+        )
 
-        movies_data = [
-            {
+        wallet = get_producer_wallet(request.user)
+        movies = (
+            Movie.objects
+            .filter(producer_profile=request.user)
+            .annotate(
+                total_revenue=Coalesce(Sum('payments__amount', filter=payment_date_filter), 0),
+                purchase_count=Count('payments', filter=payment_date_filter),
+                pending_count=Count('payments', filter=Q(payments__status='Pending')),
+                failed_count=Count('payments', filter=Q(payments__status='Failed')),
+                total_watch_seconds=Coalesce(Sum('watch_progress__progress_seconds'), 0),
+                avg_watch_seconds=Avg('watch_progress__progress_seconds'),
+                total_watches=Count('watch_progress'),
+                completed_watches=Count('watch_progress', filter=Q(watch_progress__completed=True)),
+            )
+            .order_by('-created_at')
+        )
+
+        movies_data = []
+        for movie in movies:
+            total_watches = movie.total_watches or 0
+            completed_watches = movie.completed_watches or 0
+            completion_rate = round(completed_watches / total_watches, 4) if total_watches > 0 else 0.0
+            avg_watch_seconds = movie.avg_watch_seconds or 0
+            net_earnings, platform_commission = producer_split(movie.total_revenue)
+            movies_data.append({
                 'id': movie.id,
                 'title': movie.title,
                 'price': movie.price,
-                'views': movie.views,
+                'upload_date': movie.created_at,
                 'release_date': movie.release_date,
+                'views': movie.views,
+                'total_watch_time_minutes': round(movie.total_watch_seconds / 60, 2),
+                'avg_watch_duration_minutes': round(avg_watch_seconds / 60, 2),
+                'completion_rate': completion_rate,
                 'total_revenue': movie.total_revenue,
+                'platform_commission': platform_commission,
+                'net_earnings': net_earnings,
                 'purchase_count': movie.purchase_count,
-                'producer_share': (movie.total_revenue * 70) // 100,
-            }
-            for movie in movies
-        ]
+                'payment_statuses': {
+                    'pending': movie.pending_count,
+                    'failed': movie.failed_count,
+                },
+            })
+
+        if request.GET.get('export') == 'csv':
+            headers = [
+                'Movie Title', 'Upload Date', 'Release Date', 'Price (RWF)', 'Views',
+                'Total Watch Time (min)', 'Avg Watch Duration (min)', 'Completion Rate',
+                'Total Revenue (RWF)', 'Platform Commission (RWF)', 'Net Earnings (RWF)',
+                'Purchase Count', 'Pending Payments', 'Failed Payments',
+            ]
+            rows = [
+                [
+                    m['title'],
+                    m['upload_date'].date() if m['upload_date'] else '',
+                    m['release_date'],
+                    m['price'],
+                    m['views'],
+                    m['total_watch_time_minutes'],
+                    m['avg_watch_duration_minutes'],
+                    m['completion_rate'],
+                    m['total_revenue'],
+                    m['platform_commission'],
+                    m['net_earnings'],
+                    m['purchase_count'],
+                    m['payment_statuses']['pending'],
+                    m['payment_statuses']['failed'],
+                ]
+                for m in movies_data
+            ]
+            return _csv_response('my-movies-report.csv', headers, rows)
 
         return Response({
+            'date_range': {'start_date': since.date(), 'end_date': until.date()},
             'wallet': wallet,
             'movies': movies_data,
         })
@@ -307,11 +427,16 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
         summary='Analytics for one of my movies',
         description=(
             'Returns view count, revenue breakdown (gross / 30% commission / 70% earnings), '
-            'total buyers, and a paginated list of individual purchases for a specific movie.'
+            'total buyers, watch engagement stats, and a paginated buyer list. '
+            'Revenue is filterable by date range; watch stats are lifetime totals.'
         ),
         parameters=[
+            OpenApiParameter('start_date', OpenApiTypes.DATE, OpenApiParameter.QUERY,
+                             required=False, description='Filter revenue from this date (YYYY-MM-DD)'),
+            OpenApiParameter('end_date', OpenApiTypes.DATE, OpenApiParameter.QUERY,
+                             required=False, description='Filter revenue up to this date inclusive (YYYY-MM-DD)'),
             OpenApiParameter('page', OpenApiTypes.INT, OpenApiParameter.QUERY,
-                             required=False, default=1, description='Page number (20 per page)'),
+                             required=False, default=1, description='Page number for buyer list (20 per page)'),
         ],
         responses={
             200: inline_serializer(
@@ -320,17 +445,17 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
                     'movie_id': drf_serializers.IntegerField(),
                     'title': drf_serializers.CharField(),
                     'views': drf_serializers.IntegerField(),
-                    'total_buyers': drf_serializers.IntegerField(help_text='Number of completed purchases'),
-                    'gross_revenue': drf_serializers.IntegerField(help_text='Sum of all completed payments (RWF)'),
-                    'ikigembe_commission': drf_serializers.IntegerField(help_text='30% platform share (RWF)'),
+                    'total_buyers': drf_serializers.IntegerField(help_text='Completed purchases in date range'),
+                    'gross_revenue': drf_serializers.IntegerField(help_text='Sum of completed payments in date range (RWF)'),
+                    'platform_commission': drf_serializers.IntegerField(help_text='30% platform share (RWF)'),
                     'producer_earnings': drf_serializers.IntegerField(help_text='70% producer share (RWF)'),
                     'watch_stats': inline_serializer(
                         name='WatchStats',
                         fields={
-                            'total_watchers': drf_serializers.IntegerField(help_text='Users who started watching'),
-                            'completed_count': drf_serializers.IntegerField(help_text='Users who finished the movie'),
-                            'completion_rate_pct': drf_serializers.FloatField(help_text='% of watchers who finished'),
-                            'avg_progress_pct': drf_serializers.FloatField(help_text='Average % of the movie watched across all watchers'),
+                            'total_watchers': drf_serializers.IntegerField(help_text='Lifetime unique viewers who started watching'),
+                            'completed_count': drf_serializers.IntegerField(help_text='Viewers who finished the movie'),
+                            'completion_rate': drf_serializers.FloatField(help_text='Fraction of watchers who finished (0–1)'),
+                            'avg_progress_percent': drf_serializers.FloatField(help_text='Average % of the movie watched (0–100)'),
                         },
                     ),
                     'page': drf_serializers.IntegerField(),
@@ -357,8 +482,13 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
         except Movie.DoesNotExist:
             return Response({'error': 'Movie not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        since, until = _parse_date_range(request, default_days=365)
+
         payments = Payment.objects.filter(
-            movie=movie, status='Completed'
+            movie=movie,
+            status='Completed',
+            created_at__gte=since,
+            created_at__lte=until,
         ).select_related('user').order_by('-created_at')
 
         gross = payments.aggregate(total=Coalesce(Sum('amount'), 0))['total']
@@ -378,12 +508,11 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
             for p in payments[start:start + page_size]
         ]
 
-        # Watch completion stats from WatchProgress — all aggregated in the DB,
-        # no rows materialised into Python memory.
+        # Lifetime watch stats — not date-filtered (engagement is cumulative)
         watch_qs = WatchProgress.objects.filter(movie=movie)
         total_watchers = watch_qs.count()
         completed_count = watch_qs.filter(completed=True).count()
-        completion_rate_pct = round(completed_count * 100 / total_watchers, 1) if total_watchers else 0.0
+        completion_rate = round(completed_count / total_watchers, 4) if total_watchers else 0.0
         avg_result = watch_qs.filter(duration_seconds__gt=0).aggregate(
             avg_pct=Avg(
                 ExpressionWrapper(
@@ -392,7 +521,7 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
                 )
             )
         )
-        avg_progress_pct = round(avg_result['avg_pct'] or 0.0, 1)
+        avg_progress_percent = round(avg_result['avg_pct'] or 0.0, 1)
 
         return Response({
             'movie_id': movie.id,
@@ -400,13 +529,13 @@ class ProducerMovieAnalyticsView(ProducerBaseView):
             'views': movie.views,
             'total_buyers': total,
             'gross_revenue': gross,
-            'ikigembe_commission': commission,
+            'platform_commission': commission,
             'producer_earnings': earnings,
             'watch_stats': {
                 'total_watchers': total_watchers,
                 'completed_count': completed_count,
-                'completion_rate_pct': completion_rate_pct,
-                'avg_progress_pct': avg_progress_pct,
+                'completion_rate': completion_rate,
+                'avg_progress_percent': avg_progress_percent,
             },
             'page': page,
             'total_results': total,
@@ -424,32 +553,53 @@ class ProducerEarningsReportView(ProducerBaseView):
         tags=[_REPORTS_TAG],
         summary='Earnings report by period',
         description=(
-            'Returns earnings grouped by day (last 30 days), week (last 12 weeks), '
-            'or month (last 12 months). Each bucket shows gross revenue, '
-            'Ikigembe 30% commission, and the producer\'s 70% net earnings.'
+            'Returns all-time KPIs plus earnings grouped by day (last 30 days), '
+            'week (last 12 weeks), or month (last 12 months). '
+            'KPIs include total gross revenue, net earnings, platform commission, '
+            'best-performing movie, and average watch completion rate across all movies.'
         ),
         parameters=[
-            OpenApiParameter(
-                name='period',
-                type=OpenApiTypes.STR,
-                location=OpenApiParameter.QUERY,
-                required=False,
-                enum=['daily', 'weekly', 'monthly'],
-                default='monthly',
-                description='Grouping period',
-            ),
+            OpenApiParameter('period', OpenApiTypes.STR, OpenApiParameter.QUERY,
+                             required=False, enum=['daily', 'weekly', 'monthly'],
+                             default='monthly', description='Grouping granularity for the trend section'),
+            OpenApiParameter('start_date', OpenApiTypes.DATE, OpenApiParameter.QUERY,
+                             required=False, description='Trend start date (YYYY-MM-DD). Overrides period default.'),
+            OpenApiParameter('end_date', OpenApiTypes.DATE, OpenApiParameter.QUERY,
+                             required=False, description='Trend end date inclusive (YYYY-MM-DD). Defaults to today.'),
+            OpenApiParameter('export', OpenApiTypes.STR, OpenApiParameter.QUERY,
+                             required=False, enum=['csv'], description='Set to "csv" to download as CSV'),
         ],
         responses={
             200: inline_serializer(
                 name='EarningsReport',
                 fields={
+                    'kpis': inline_serializer(
+                        name='EarningsKPIs',
+                        fields={
+                            'total_gross_revenue': drf_serializers.IntegerField(help_text='All-time gross revenue (RWF)'),
+                            'total_net_earnings': drf_serializers.IntegerField(help_text='Your 70% all-time (RWF)'),
+                            'total_platform_commission': drf_serializers.IntegerField(help_text='30% platform commission all-time (RWF)'),
+                            'total_purchases': drf_serializers.IntegerField(help_text='All-time completed purchases'),
+                            'total_movies': drf_serializers.IntegerField(),
+                            'avg_revenue_per_movie': drf_serializers.IntegerField(help_text='RWF'),
+                            'avg_completion_rate': drf_serializers.FloatField(help_text='Avg completion rate across all your movies (0–1)'),
+                            'best_movie': inline_serializer(
+                                name='BestMovie',
+                                fields={
+                                    'id': drf_serializers.IntegerField(allow_null=True),
+                                    'title': drf_serializers.CharField(allow_null=True),
+                                    'revenue': drf_serializers.IntegerField(allow_null=True),
+                                },
+                            ),
+                        },
+                    ),
                     'period': drf_serializers.CharField(help_text='daily | weekly | monthly'),
-                    'results': inline_serializer(
+                    'trend': inline_serializer(
                         name='EarningsBucket',
                         fields={
                             'period_start': drf_serializers.DateTimeField(),
                             'gross_revenue': drf_serializers.IntegerField(help_text='RWF'),
-                            'ikigembe_commission': drf_serializers.IntegerField(help_text='30% (RWF)'),
+                            'platform_commission': drf_serializers.IntegerField(help_text='30% (RWF)'),
                             'producer_earnings': drf_serializers.IntegerField(help_text='70% (RWF)'),
                             'transactions': drf_serializers.IntegerField(help_text='Number of completed purchases'),
                         },
@@ -462,24 +612,27 @@ class ProducerEarningsReportView(ProducerBaseView):
     )
     def get(self, request):
         period = request.query_params.get('period', 'monthly')
-        now = timezone.now()
 
         if period == 'daily':
             trunc_fn = TruncDay
-            cutoff = now - timezone.timedelta(days=30)
+            default_days = 30
         elif period == 'weekly':
             trunc_fn = TruncWeek
-            cutoff = now - timezone.timedelta(weeks=12)
+            default_days = 84  # 12 weeks
         else:
             period = 'monthly'
             trunc_fn = TruncMonth
-            cutoff = now - timezone.timedelta(days=365)
+            default_days = 365
 
+        since, until = _parse_date_range(request, default_days=default_days)
+
+        # ── Trend (period-grouped, date-range filtered) ─────────────────────
         rows = (
             Payment.objects.filter(
                 movie__producer_profile=request.user,
                 status='Completed',
-                created_at__gte=cutoff,
+                created_at__gte=since,
+                created_at__lte=until,
             )
             .annotate(bucket=trunc_fn('created_at'))
             .values('bucket')
@@ -487,19 +640,104 @@ class ProducerEarningsReportView(ProducerBaseView):
             .order_by('bucket')
         )
 
-        results = []
+        trend = []
         for row in rows:
             gross = row['gross']
             earnings, commission = producer_split(gross)
-            results.append({
+            trend.append({
                 'period_start': row['bucket'],
                 'gross_revenue': gross,
-                'ikigembe_commission': commission,
+                'platform_commission': commission,
                 'producer_earnings': earnings,
                 'transactions': row['count'],
             })
 
-        return Response({'period': period, 'results': results})
+        # ── All-time KPIs (not date-filtered — always lifetime totals) ───────
+        all_payments = Payment.objects.filter(
+            movie__producer_profile=request.user,
+            status='Completed',
+        )
+        agg = all_payments.aggregate(gross=Coalesce(Sum('amount'), 0), purchases=Count('id'))
+        total_gross = agg['gross']
+        total_purchases = agg['purchases']
+        total_net_earnings, total_platform_commission = producer_split(total_gross)
+
+        total_movies = Movie.objects.filter(producer_profile=request.user).count()
+        avg_revenue_per_movie = total_gross // total_movies if total_movies > 0 else 0
+
+        best_row = (
+            all_payments
+            .values('movie_id', 'movie__title')
+            .annotate(revenue=Sum('amount'))
+            .order_by('-revenue')
+            .first()
+        )
+        best_movie = (
+            {'id': best_row['movie_id'], 'title': best_row['movie__title'], 'revenue': best_row['revenue']}
+            if best_row else {'id': None, 'title': None, 'revenue': None}
+        )
+
+        watch_agg = WatchProgress.objects.filter(
+            movie__producer_profile=request.user
+        ).aggregate(
+            total=Count('id'),
+            completed=Count('id', filter=Q(completed=True)),
+        )
+        avg_completion_rate = (
+            round(watch_agg['completed'] / watch_agg['total'], 4)
+            if watch_agg['total'] else 0.0
+        )
+
+        kpis = {
+            'total_gross_revenue': total_gross,
+            'total_net_earnings': total_net_earnings,
+            'total_platform_commission': total_platform_commission,
+            'total_purchases': total_purchases,
+            'total_movies': total_movies,
+            'avg_revenue_per_movie': avg_revenue_per_movie,
+            'avg_completion_rate': avg_completion_rate,
+            'best_movie': best_movie,
+        }
+
+        if request.GET.get('export') == 'csv':
+            kpi_headers = ['KPI', 'Value']
+            kpi_rows = [
+                ['Total Gross Revenue (RWF)', kpis['total_gross_revenue']],
+                ['Total Net Earnings (RWF)', kpis['total_net_earnings']],
+                ['Total Platform Commission (RWF)', kpis['total_platform_commission']],
+                ['Total Purchases', kpis['total_purchases']],
+                ['Total Movies', kpis['total_movies']],
+                ['Avg Revenue Per Movie (RWF)', kpis['avg_revenue_per_movie']],
+                ['Avg Completion Rate', kpis['avg_completion_rate']],
+                ['Best Movie', f"{kpis['best_movie']['title']} ({kpis['best_movie']['revenue']} RWF)"
+                 if kpis['best_movie']['title'] else 'N/A'],
+            ]
+            trend_headers = ['Period Start', 'Gross Revenue (RWF)',
+                             'Platform Commission (RWF)', 'Net Earnings (RWF)', 'Transactions']
+            trend_rows = [
+                [
+                    t['period_start'].date() if t['period_start'] else '',
+                    t['gross_revenue'], t['platform_commission'],
+                    t['producer_earnings'], t['transactions'],
+                ]
+                for t in trend
+            ]
+            from django.http import HttpResponse
+            response = HttpResponse(content_type='text/csv')
+            response['Content-Disposition'] = f'attachment; filename="earnings-report-{period}.csv"'
+            import csv as _csv
+            writer = _csv.writer(response)
+            writer.writerows(kpi_rows)
+            writer.writerow([])
+            writer.writerow(trend_headers)
+            writer.writerows(trend_rows)
+            return response
+
+        return Response({
+            'kpis': kpis,
+            'period': period,
+            'trend': trend,
+        })
 
 
 # ─────────────────────────────────────────────

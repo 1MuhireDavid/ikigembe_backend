@@ -1,6 +1,9 @@
+import csv
 import uuid
 import secrets
 import logging
+
+from django.http import HttpResponse
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -13,7 +16,7 @@ from drf_spectacular.utils import (
     OpenApiResponse,
 )
 from drf_spectacular.types import OpenApiTypes
-from django.db.models import Sum, Count, Q, Max, Min
+from django.db.models import Sum, Count, Avg, Q, Max, Min
 from django.db.models.functions import Coalesce, TruncDay, TruncMonth, TruncWeek, TruncYear
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
@@ -23,7 +26,7 @@ from requests import RequestException as RequestsRequestException
 
 from apps.users.permissions import IsAdminRole
 from apps.users.serializers import AdminCreateProducerSerializer
-from apps.movies.models import Movie
+from apps.movies.models import Movie, WatchProgress
 from apps.payments.models import Payment, WithdrawalRequest
 from apps.payments.serializers import AdminWithdrawalRequestSerializer, get_producer_wallet, producer_split
 from apps.payments.pawapay import initiate_payout, detect_correspondent
@@ -51,6 +54,16 @@ def _log_admin_action(request, action, detail=None, target_user=None, target_wit
 
 _TAG = 'Admin Dashboard'
 _REPORTS_TAG = 'Admin Reports'
+
+
+def _csv_response(filename, headers, rows):
+    """Return a CSV file download response."""
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    writer = csv.writer(response)
+    writer.writerow(headers)
+    writer.writerows(rows)
+    return response
 
 
 def _safe_page(request):
@@ -1435,13 +1448,26 @@ class AdminRevenueTrendView(AdminBaseView):
                 name='AdminRevenueTrend',
                 fields={
                     'period': drf_serializers.CharField(help_text='daily | weekly | monthly | yearly'),
+                    'summary': inline_serializer(
+                        name='AdminRevenueTrendSummary',
+                        fields={
+                            'total_revenue': drf_serializers.IntegerField(help_text='Gross completed revenue in range (RWF)'),
+                            'total_refunds': drf_serializers.IntegerField(help_text='Sum of failed payment amounts (RWF)'),
+                            'net_revenue': drf_serializers.IntegerField(help_text='total_revenue − total_refunds (RWF)'),
+                            'producer_share': drf_serializers.IntegerField(help_text='70% of net_revenue (RWF)'),
+                            'platform_commission': drf_serializers.IntegerField(help_text='30% of net_revenue (RWF)'),
+                            'purchase_count': drf_serializers.IntegerField(),
+                        },
+                    ),
                     'trend': inline_serializer(
                         name='AdminRevenueTrendItem',
                         fields={
                             'period_start': drf_serializers.DateTimeField(),
                             'total_revenue': drf_serializers.IntegerField(help_text='RWF'),
-                            'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
-                            'ikigembe_commission': drf_serializers.IntegerField(help_text='30% of total_revenue (RWF)'),
+                            'refunds': drf_serializers.IntegerField(help_text='Failed payment amounts this period (RWF)'),
+                            'net_revenue': drf_serializers.IntegerField(help_text='total_revenue − refunds (RWF)'),
+                            'producer_share': drf_serializers.IntegerField(help_text='70% of net_revenue (RWF)'),
+                            'platform_commission': drf_serializers.IntegerField(help_text='30% of net_revenue (RWF)'),
                             'purchase_count': drf_serializers.IntegerField(),
                         },
                         many=True,
@@ -1457,7 +1483,6 @@ class AdminRevenueTrendView(AdminBaseView):
 
         period = request.GET.get('period', 'monthly')
 
-        # Determine trunc function and default lookback for fallback
         if period == 'daily':
             trunc_fn = TruncDay
             default_days = _safe_int(request, 'periods', 30, maximum=90)
@@ -1474,7 +1499,7 @@ class AdminRevenueTrendView(AdminBaseView):
 
         since, until = _parse_date_range(request, default_days)
 
-        rows = (
+        completed_rows = (
             Payment.objects
             .filter(status='Completed', created_at__gte=since, created_at__lte=until)
             .annotate(period_start=trunc_fn('created_at'))
@@ -1483,19 +1508,65 @@ class AdminRevenueTrendView(AdminBaseView):
             .order_by('period_start')
         )
 
+        refund_map = {
+            row['period_start']: row['refunds'] or 0
+            for row in (
+                Payment.objects
+                .filter(status='Failed', created_at__gte=since, created_at__lte=until)
+                .annotate(period_start=trunc_fn('created_at'))
+                .values('period_start')
+                .annotate(refunds=Sum('amount'))
+            )
+        }
+
         trend = []
-        for row in rows:
-            rev = row['total_revenue']
-            producer_share = (rev * 70) // 100
+        for row in completed_rows:
+            rev = row['total_revenue'] or 0
+            refunds = refund_map.get(row['period_start'], 0)
+            net = rev - refunds
+            producer_share, platform_commission = producer_split(net)
             trend.append({
                 'period_start': row['period_start'],
                 'total_revenue': rev,
+                'refunds': refunds,
+                'net_revenue': net,
                 'producer_share': producer_share,
-                'ikigembe_commission': rev - producer_share,
+                'platform_commission': platform_commission,
                 'purchase_count': row['purchase_count'],
             })
 
-        return Response({'period': period, 'trend': trend})
+        total_revenue = sum(r['total_revenue'] for r in trend)
+        total_refunds = sum(r['refunds'] for r in trend)
+        net_revenue = total_revenue - total_refunds
+        summary_producer_share, summary_platform_commission = producer_split(net_revenue)
+
+        if request.GET.get('export') == 'csv':
+            headers = [
+                'Period Start', 'Total Revenue (RWF)', 'Refunds (RWF)', 'Net Revenue (RWF)',
+                'Producer Share (RWF)', 'Platform Commission (RWF)', 'Purchase Count',
+            ]
+            rows = [
+                [
+                    r['period_start'].date() if r['period_start'] else '',
+                    r['total_revenue'], r['refunds'], r['net_revenue'],
+                    r['producer_share'], r['platform_commission'], r['purchase_count'],
+                ]
+                for r in trend
+            ]
+            return _csv_response(f'revenue-trend-{period}.csv', headers, rows)
+
+        return Response({
+            'period': period,
+            'summary': {
+                'total_revenue': total_revenue,
+                'total_refunds': total_refunds,
+                'net_revenue': net_revenue,
+                'producer_share': summary_producer_share,
+                'platform_commission': summary_platform_commission,
+                'purchase_count': sum(r['purchase_count'] for r in trend),
+            },
+            'trend': trend,
+        })
 
 
 class AdminTopMoviesView(AdminBaseView):
@@ -1504,7 +1575,8 @@ class AdminTopMoviesView(AdminBaseView):
         summary='Top movies by revenue or views',
         description=(
             'Returns the top N movies ranked by completed payment revenue or by raw view count. '
-            'Includes per-movie purchase count and producer name.'
+            'Includes engagement metrics from WatchProgress: unique viewers, average watch time, '
+            'and completion rate. revenue_per_view is a simple ROI proxy (revenue ÷ views).'
         ),
         parameters=[
             OpenApiParameter(
@@ -1512,7 +1584,7 @@ class AdminTopMoviesView(AdminBaseView):
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 required=False,
-                enum=['revenue', 'views'],
+                enum=['revenue', 'views', 'unique_viewers', 'completion_rate'],
                 default='revenue',
                 description='Ranking metric',
             ),
@@ -1551,9 +1623,14 @@ class AdminTopMoviesView(AdminBaseView):
                             'title': drf_serializers.CharField(),
                             'producer': drf_serializers.CharField(help_text='Producer full name'),
                             'views': drf_serializers.IntegerField(),
+                            'unique_viewers': drf_serializers.IntegerField(help_text='Distinct users who watched (WatchProgress)'),
+                            'avg_watch_time_minutes': drf_serializers.FloatField(help_text='Average playback position in minutes'),
+                            'completion_rate': drf_serializers.FloatField(help_text='Fraction of viewers who completed the movie (0–1)'),
                             'purchase_count': drf_serializers.IntegerField(),
                             'total_revenue': drf_serializers.IntegerField(help_text='Sum of completed payments (RWF)'),
                             'producer_share': drf_serializers.IntegerField(help_text='70% of total_revenue (RWF)'),
+                            'platform_commission': drf_serializers.IntegerField(help_text='30% of total_revenue (RWF)'),
+                            'revenue_per_view': drf_serializers.FloatField(help_text='total_revenue ÷ views — ROI proxy'),
                         },
                         many=True,
                     ),
@@ -1576,25 +1653,61 @@ class AdminTopMoviesView(AdminBaseView):
         movies = Movie.objects.select_related('producer_profile').annotate(
             total_revenue=Coalesce(Sum('payments__amount', filter=date_filter), 0),
             purchase_count=Count('payments', filter=date_filter),
+            unique_viewers=Count('watch_progress__user', distinct=True),
+            avg_watch_seconds=Avg('watch_progress__progress_seconds'),
+            total_watches=Count('watch_progress'),
+            completed_watches=Count('watch_progress', filter=Q(watch_progress__completed=True)),
         )
 
-        if sort == 'views':
-            movies = movies.order_by('-views')
-        else:
+        sort_map = {
+            'views': '-views',
+            'unique_viewers': '-unique_viewers',
+            'completion_rate': '-completed_watches',
+        }
+        movies = movies.order_by(sort_map.get(sort, '-total_revenue'))
+        if sort not in sort_map and sort != 'revenue':
             sort = 'revenue'
-            movies = movies.order_by('-total_revenue')
 
         results = []
         for movie in movies[:limit]:
+            total_watches = movie.total_watches or 0
+            completed_watches = movie.completed_watches or 0
+            completion_rate = round(completed_watches / total_watches, 4) if total_watches > 0 else 0.0
+            avg_watch_seconds = movie.avg_watch_seconds or 0
+            views = movie.views or 0
+            producer_share, platform_commission = producer_split(movie.total_revenue)
             results.append({
                 'id': movie.id,
                 'title': movie.title,
                 'producer': movie.producer_profile.full_name if movie.producer_profile else 'Unknown',
-                'views': movie.views,
+                'views': views,
+                'unique_viewers': movie.unique_viewers,
+                'avg_watch_time_minutes': round(avg_watch_seconds / 60, 2),
+                'completion_rate': completion_rate,
                 'purchase_count': movie.purchase_count,
                 'total_revenue': movie.total_revenue,
-                'producer_share': (movie.total_revenue * 70) // 100,
+                'producer_share': producer_share,
+                'platform_commission': platform_commission,
+                'revenue_per_view': round(movie.total_revenue / views, 2) if views > 0 else 0.0,
             })
+
+        if request.GET.get('export') == 'csv':
+            headers = [
+                'Rank', 'Movie ID', 'Title', 'Producer', 'Views', 'Unique Viewers',
+                'Avg Watch Time (min)', 'Completion Rate', 'Purchase Count',
+                'Total Revenue (RWF)', 'Producer Share (RWF)', 'Platform Commission (RWF)',
+                'Revenue Per View',
+            ]
+            rows = [
+                [
+                    i + 1, r['id'], r['title'], r['producer'], r['views'], r['unique_viewers'],
+                    r['avg_watch_time_minutes'], r['completion_rate'], r['purchase_count'],
+                    r['total_revenue'], r['producer_share'], r['platform_commission'],
+                    r['revenue_per_view'],
+                ]
+                for i, r in enumerate(results)
+            ]
+            return _csv_response('top-movies.csv', headers, rows)
 
         return Response({'sort': sort, 'results': results})
 
@@ -1635,6 +1748,15 @@ class AdminUserGrowthView(AdminBaseView):
             200: inline_serializer(
                 name='AdminUserGrowth',
                 fields={
+                    'summary': inline_serializer(
+                        name='AdminUserGrowthSummary',
+                        fields={
+                            'total_users': drf_serializers.IntegerField(),
+                            'total_producers': drf_serializers.IntegerField(),
+                            'total_viewers': drf_serializers.IntegerField(),
+                            'paying_users_all_time': drf_serializers.IntegerField(help_text='Distinct users with at least one completed payment'),
+                        },
+                    ),
                     'trend': inline_serializer(
                         name='AdminUserGrowthItem',
                         fields={
@@ -1642,6 +1764,8 @@ class AdminUserGrowthView(AdminBaseView):
                             'viewers': drf_serializers.IntegerField(),
                             'producers': drf_serializers.IntegerField(),
                             'total': drf_serializers.IntegerField(),
+                            'active_users': drf_serializers.IntegerField(help_text='Distinct users with WatchProgress activity this month'),
+                            'paying_users': drf_serializers.IntegerField(help_text='Distinct users with a completed payment this month'),
                         },
                         many=True,
                     ),
@@ -1677,18 +1801,65 @@ class AdminUserGrowthView(AdminBaseView):
             )
         }
 
-        all_months = sorted(set(viewer_rows) | set(producer_rows))
+        active_map = {
+            row['month']: row['active_users']
+            for row in (
+                WatchProgress.objects
+                .filter(last_watched_at__gte=since, last_watched_at__lte=until)
+                .annotate(month=TruncMonth('last_watched_at'))
+                .values('month')
+                .annotate(active_users=Count('user', distinct=True))
+            )
+        }
+
+        paying_map = {
+            row['month']: row['paying_users']
+            for row in (
+                Payment.objects
+                .filter(status='Completed', created_at__gte=since, created_at__lte=until)
+                .annotate(month=TruncMonth('created_at'))
+                .values('month')
+                .annotate(paying_users=Count('user', distinct=True))
+            )
+        }
+
+        all_months = sorted(set(viewer_rows) | set(producer_rows) | set(active_map) | set(paying_map))
         trend = [
             {
                 'month': m,
                 'viewers': viewer_rows.get(m, 0),
                 'producers': producer_rows.get(m, 0),
                 'total': viewer_rows.get(m, 0) + producer_rows.get(m, 0),
+                'active_users': active_map.get(m, 0),
+                'paying_users': paying_map.get(m, 0),
             }
             for m in all_months
         ]
 
-        return Response({'trend': trend})
+        if request.GET.get('export') == 'csv':
+            headers = [
+                'Month', 'New Viewers', 'New Producers', 'Total New Users',
+                'Active Users', 'Paying Users',
+            ]
+            rows = [
+                [
+                    r['month'].date() if r['month'] else '',
+                    r['viewers'], r['producers'], r['total'],
+                    r['active_users'], r['paying_users'],
+                ]
+                for r in trend
+            ]
+            return _csv_response('user-growth.csv', headers, rows)
+
+        return Response({
+            'summary': {
+                'total_users': User.objects.count(),
+                'total_producers': User.objects.filter(role='Producer').count(),
+                'total_viewers': User.objects.filter(role='Viewer').count(),
+                'paying_users_all_time': Payment.objects.filter(status='Completed').values('user').distinct().count(),
+            },
+            'trend': trend,
+        })
 
 
 # ─────────────────────────────────────────────
@@ -2532,3 +2703,4 @@ class AdminPaymentResolveView(AdminBaseView):
             'movie': payment.movie.title if payment.movie else 'Unknown',
             'status': payment.status,
         })
+
