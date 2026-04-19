@@ -984,8 +984,9 @@ class AdminWithdrawalsListView(AdminBaseView):
         summary='List producer withdrawal requests',
         description=(
             'Returns paginated withdrawal requests. '
-            'Filter by `?status=Pending|Approved|Processing|Completed|Rejected|Failed`. '
-            'Without a filter, all statuses are returned.'
+            'Filter by `?status=Pending|Approved|Processing|Completed|Rejected|Failed` and/or '
+            '`?producer_id=<id>` to scope results to a single producer. '
+            'Without filters, all statuses and producers are returned.'
         ),
         parameters=[
             OpenApiParameter(
@@ -995,6 +996,13 @@ class AdminWithdrawalsListView(AdminBaseView):
                 required=False,
                 enum=['Pending', 'Approved', 'Processing', 'Completed', 'Rejected', 'Failed'],
                 description='Filter by withdrawal status',
+            ),
+            OpenApiParameter(
+                name='producer_id',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Filter by producer user ID',
             ),
             OpenApiParameter(
                 name='page',
@@ -1024,6 +1032,11 @@ class AdminWithdrawalsListView(AdminBaseView):
         status_filter = request.GET.get('status')
         if status_filter:
             qs = qs.filter(status=status_filter)
+        producer_id = request.GET.get('producer_id')
+        if producer_id:
+            if not producer_id.isdigit():
+                return Response({'error': 'producer_id must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+            qs = qs.filter(producer_id=int(producer_id))
 
         page = _safe_page(request)
         page_size = 20

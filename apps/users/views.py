@@ -1,6 +1,10 @@
+import ipaddress
+import random
 import uuid
+from datetime import timedelta
 
 from django.conf import settings
+from django.utils import timezone
 from django.contrib.auth import get_user_model
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
@@ -22,6 +26,7 @@ from .serializers import (
     RefreshSerializer
 )
 from .emails import send_welcome_email, send_password_reset_email
+from .models import FailedLoginAttempt
 
 User = get_user_model()
 
@@ -170,6 +175,39 @@ class RegisterView(APIView):
 # Login
 # ─────────────────────────────────────────────
 
+_LOCKOUT_MAX_ATTEMPTS = 5
+_LOCKOUT_WINDOW_MINUTES = 15
+
+
+def _get_client_ip(request):
+    forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if forwarded_for:
+        candidate = forwarded_for.split(',')[0].strip()
+        try:
+            ipaddress.ip_address(candidate)
+            return candidate
+        except ValueError:
+            pass
+    return request.META.get('REMOTE_ADDR', '127.0.0.1')
+
+
+def _is_locked_out(ip, identifier):
+    window = timezone.now() - timedelta(minutes=_LOCKOUT_WINDOW_MINUTES)
+    return FailedLoginAttempt.objects.filter(
+        ip_address=ip,
+        identifier__iexact=identifier,
+        created_at__gte=window,
+    ).count() >= _LOCKOUT_MAX_ATTEMPTS
+
+
+def _record_failed_attempt(ip, identifier):
+    # Probabilistic global sweep (5% of calls) so rows from abandoned attack
+    # sessions are reaped without a dedicated background task.
+    if random.random() < 0.05:
+        FailedLoginAttempt.prune_expired(_LOCKOUT_WINDOW_MINUTES)
+    FailedLoginAttempt.objects.create(ip_address=ip, identifier=identifier)
+
+
 class LoginView(APIView):
     """
     Authenticate with email or phone number + password.
@@ -224,9 +262,23 @@ class LoginView(APIView):
         ],
     )
     def post(self, request):
+        ip = _get_client_ip(request)
+        identifier = request.data.get('identifier', '').strip()
+
+        if identifier and _is_locked_out(ip, identifier):
+            return Response(
+                {'error': f'Too many failed login attempts. Please try again in {_LOCKOUT_WINDOW_MINUTES} minutes.'},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
         serializer = LoginSerializer(data=request.data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            if identifier:
+                _record_failed_attempt(ip, identifier)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
         user = serializer.validated_data['user']
+        FailedLoginAttempt.objects.filter(ip_address=ip, identifier__iexact=identifier).delete()
         data = _token_response(user)
         return Response(data, status=status.HTTP_200_OK)
 
@@ -627,8 +679,9 @@ class ChangePasswordView(APIView):
             return Response({'error': 'Password must be at least 8 characters.'}, status=status.HTTP_400_BAD_REQUEST)
 
         request.user.set_password(new)
-        request.user.save(update_fields=['password'])
-        return Response({'message': 'Password updated successfully.'})
+        request.user.active_session_key = str(uuid.uuid4())
+        request.user.save(update_fields=['password', 'active_session_key'])
+        return Response({'message': 'Password updated successfully. Please log in again.'})
 
 
 # ─────────────────────────────────────────────
